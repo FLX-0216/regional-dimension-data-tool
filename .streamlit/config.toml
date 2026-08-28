@@ -1,0 +1,7 @@
+[server]
+# 上传文件大小上限（单位 MB）。Union 单文件可达数百 MB，故设为 2048（2 GB）。
+maxUploadSize = 2048
+
+[browser]
+# 不自动收集用户邮箱等信息
+gatherUsageStats = false
