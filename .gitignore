@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+_streamlit_uploads/
+*.parquet.tmp
+.DS_Store
