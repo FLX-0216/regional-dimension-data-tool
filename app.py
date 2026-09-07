@@ -21,6 +21,7 @@ import os
 os.environ.setdefault("ARROW_DEFAULT_MEMORY_POOL", "system")
 
 import io
+import re
 import time
 import uuid
 import pandas as pd
@@ -51,6 +52,18 @@ MAPPING_COLS = ["产线大类", "纯产线大类", "非纯产线大类"]
 def bucket_path(upload_type):
     safe = upload_type.replace("&", "_").replace(" ", "")
     return os.path.join(DATA_DIR, f"data_{safe}.parquet")
+
+
+def _bucket_mtime(upload_type):
+    """数据桶文件 mtime，用于让缓存随数据上传/清理自动失效。"""
+    p = bucket_path(upload_type)
+    return os.path.getmtime(p) if os.path.exists(p) else 0
+
+
+def week_sort_key(w):
+    """将 'Week10' 解析为可比较的整数 10，用于自然升序排序。"""
+    nums = re.findall(r"\d+", str(w))
+    return int(nums[0]) if nums else 0
 
 
 def load_bucket(upload_type):
@@ -430,11 +443,15 @@ def _mapping_mtime():
 
 
 @st.cache_data(show_spinner=False)
-def _load_fcst_analysis_data(fy, _mapping_mtime_value):
+def _load_fcst_analysis_data(fy, _mapping_mtime_value, _fcst_mt, _dgq_mt, _hist_mt):
     """按财年财季一次性加载 FCST / DG&Quota / 历史Union 并聚合。
 
     这是 FCST 分析最耗时的部分（读 Parquet + apply_mapping + groupby），
     缓存后切换 Cycle / 范围 / 战区都只需切片和构建展示表，响应更快。
+
+    缓存 key 包含 Mapping 与三个数据桶的 mtime：任何一次上传/清理都会
+    改写对应 parquet，使 mtime 变化，从而自动失效缓存，避免拿到旧数据
+    （例如新上传的 Week 显示为 0）。
     """
     fcst = load_bucket("FCST")
     mapping_df = load_mapping()
@@ -509,7 +526,9 @@ def _segmented_buttons(label, options, key, default=None):
 
 def compute_fcst(fy, cur_cycle, cmp_cycle, scope, sub_region):
     """加载并计算 FCST 分析数据，返回层级树状结果表。"""
-    fcst, dg_map, q_map, h_map, h_map_pl = _load_fcst_analysis_data(fy, _mapping_mtime())
+    fcst, dg_map, q_map, h_map, h_map_pl = _load_fcst_analysis_data(
+        fy, _mapping_mtime(), _bucket_mtime("FCST"), _bucket_mtime("DG&Quota"), _bucket_mtime("历史Union")
+    )
 
     cur = fcst[fcst["FCST Cycle"] == cur_cycle].copy()
     cmp = fcst[fcst["FCST Cycle"] == cmp_cycle].copy()
@@ -880,7 +899,7 @@ def render_fcst_analysis():
         st.warning("FCST 数据池为空，请先在左侧上传 FCST 数据。")
         return
     fy_opts = sorted(meta["财年财季"].dropna().unique().tolist())
-    cyc_opts = sorted(meta["FCST Cycle"].dropna().unique().tolist())
+    cyc_opts = sorted(meta["FCST Cycle"].dropna().unique().tolist(), key=week_sort_key)
     region_opts = sorted(meta["服务大区"].dropna().unique().tolist())
 
     # 三个核心筛选控件放在同一行，label 统一用 <small> 以保证对齐
@@ -948,7 +967,9 @@ def _render_fcst_trend(fy, scope, sub_region):
     import re
     import streamlit.components.v1 as components
 
-    fcst, _, _, _, _ = _load_fcst_analysis_data(fy, _mapping_mtime())
+    fcst, _, _, _, _ = _load_fcst_analysis_data(
+        fy, _mapping_mtime(), _bucket_mtime("FCST"), _bucket_mtime("DG&Quota"), _bucket_mtime("历史Union")
+    )
     df = fcst.copy()
     if scope != "TTL":
         df = df[df["服务大区"] == scope]
