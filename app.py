@@ -625,15 +625,24 @@ def _build_section(cur, cmp, dg_map, q_map, h_map, h_map_pl):
         c_pos = cur[cur["POS_APOS"] == pos_label]
         m_pos = cmp[cmp["POS_APOS"] == pos_label]
         add_row(pos_id, "", 0, pos_label, c_pos, m_pos, calc_ratio=True, calc_yoy=True)
-        for pl in sorted(c_pos["产线大类"].replace("", "（未匹配）").unique()):
+        # 子行 unique 用 (当前 ∪ 对比) 并集，保证"对比版有但当前版没了"的
+        # 分类（如被砍掉的产线大类、流失的大区）也能渲染出来，做到
+        # 父行金额 = 所有子行金额之和，所有 WTW 差异都看得见。
+        # 同时 fillna("（未匹配）") + replace("", "（未匹配）") 统一 NaN/空串，
+        # 避免未匹配行被静默漏掉导致父子对不上。
+        c_pls = c_pos["产线大类"].fillna("（未匹配）").replace("", "（未匹配）")
+        m_pls = m_pos["产线大类"].fillna("（未匹配）").replace("", "（未匹配）")
+        for pl in sorted(set(c_pls) | set(m_pls)):
             pl_id = f"{pos_id}_pl_{pl}"
-            c_pl = c_pos[c_pos["产线大类"].replace("", "（未匹配）") == pl]
-            m_pl = m_pos[m_pos["产线大类"].replace("", "（未匹配）") == pl]
+            c_pl = c_pos[c_pls == pl]
+            m_pl = m_pos[m_pls == pl]
             add_row(pl_id, pos_id, 1, pl, c_pl, m_pl)
-            for r in sorted(c_pl["服务大区"].replace("", "（未匹配）").unique()):
+            c_rs = c_pl["服务大区"].fillna("（未匹配）").replace("", "（未匹配）")
+            m_rs = m_pl["服务大区"].fillna("（未匹配）").replace("", "（未匹配）")
+            for r in sorted(set(c_rs) | set(m_rs)):
                 r_id = f"{pl_id}_r_{r}"
-                c_r = c_pl[c_pl["服务大区"] == r]
-                m_r = m_pl[m_pl["服务大区"] == r]
+                c_r = c_pl[c_rs == r]
+                m_r = m_pl[m_rs == r]
                 add_row(r_id, pl_id, 2, r, c_r, m_r)
                 for cust in top5_customers(c_r, m_r):
                     cust_id = f"{r_id}_c_{cust}"
