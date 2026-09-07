@@ -883,10 +883,16 @@ def render_fcst_analysis():
         fy = _segmented_buttons("财年财季", fy_opts, key="fcst_fy", default=fy_opts[-1] if fy_opts else None)
     with c2:
         st.markdown("<small>当前 FCST Cycle</small>", unsafe_allow_html=True)
-        cur_cycle = st.selectbox("", cyc_opts, index=len(cyc_opts) - 1, key="fcst_cur", label_visibility="collapsed")
+        cur_cycle = st.selectbox(
+            "当前 FCST Cycle", cyc_opts, index=len(cyc_opts) - 1,
+            key="fcst_cur", label_visibility="collapsed"
+        )
     with c3:
         st.markdown("<small>对比 FCST Cycle</small>", unsafe_allow_html=True)
-        cmp_cycle = st.selectbox("", cyc_opts, index=max(0, len(cyc_opts) - 2), key="fcst_cmp", label_visibility="collapsed")
+        cmp_cycle = st.selectbox(
+            "对比 FCST Cycle", cyc_opts, index=max(0, len(cyc_opts) - 2),
+            key="fcst_cmp", label_visibility="collapsed"
+        )
 
     scope = _segmented_buttons("范围", ["TTL"] + region_opts, key="fcst_scope", default="TTL")
 

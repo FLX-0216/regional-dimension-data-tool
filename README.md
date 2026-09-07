@@ -13,8 +13,9 @@ streamlit run app.py
 
 1. 把本仓库文件上传到 **GitHub 仓库**（需包含 `app.py`、`ops_data_processor.py`、`requirements.txt`、`.streamlit/config.toml`，以及数据池文件 `data_buckets/*.parquet` 和 `mapping_table.parquet`）。
 2. 在 [Streamlit Community Cloud](https://streamlit.io/cloud) 登录 GitHub 账号，选择该仓库。
-3. 平台自动部署，生成一个 `https://xxx.streamlit.app` 的网址。
-4. 把网址发给其他人，他们打开就能用。
+3. **关键：在 Advanced settings（高级设置）里把 Python version 选成 3.12 或 3.11**，不要留默认的 3.14。`runtime.txt` 在 Community Cloud 上不会被读取，必须在网页端手动选。
+4. 点 Deploy，等 1–2 分钟，生成一个 `https://xxx.streamlit.app` 的网址。
+5. 把网址发给其他人，他们打开就能用。
 
 ## 数据池文件说明
 
