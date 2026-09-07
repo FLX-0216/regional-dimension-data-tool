@@ -65,6 +65,28 @@ def load_bucket_columns(upload_type, columns):
         return pd.DataFrame(columns=columns)
 
 
+def _bucket_row_count(upload_type):
+    """不加载数据，直接读 Parquet 元数据返回行数。"""
+    p = bucket_path(upload_type)
+    if not os.path.exists(p):
+        return 0
+    try:
+        return int(pq.ParquetFile(p).metadata.num_rows)
+    except Exception:  # noqa
+        return 0
+
+
+def _bucket_distinct(upload_type, column):
+    """只读取指定列并返回去重排序后的选项。"""
+    p = bucket_path(upload_type)
+    if not os.path.exists(p):
+        return []
+    try:
+        return sorted(pd.read_parquet(p, columns=[column])[column].dropna().unique().tolist())
+    except Exception:  # noqa
+        return []
+
+
 def _atomic_write_parquet(df_pq, target):
     """原子写入 Parquet：先写唯一临时文件，再 os.replace 覆盖目标。
 
@@ -1237,19 +1259,15 @@ def main():
                 st.success(st.session_state["clear_result"])
                 st.session_state["clear_result"] = None
             for t in UPLOAD_TYPES:
-                df = load_bucket(t)
-                if df.empty:
+                rows = _bucket_row_count(t)
+                if rows == 0:
                     st.markdown(f"- **{t}**：（空）")
                     continue
-                fy_n = df["财年财季"].nunique()
-                cyc = (
-                    sorted(df[df["源表"].isin(FCST_FAMILY)]["FCST Cycle"].dropna().unique().tolist())
-                    if t == "FCST"
-                    else []
-                )
+                fy_opts = _bucket_distinct(t, "财年财季")
+                cyc_opts = _bucket_distinct(t, "FCST Cycle") if t == "FCST" else []
+                cyc_text = f"，FCST 周版本 {cyc_opts}" if cyc_opts else ""
                 st.markdown(
-                    f"- **{t}**：{len(df):,} 行，财年财季 {fy_n} 个"
-                    + (f"，FCST 周版本 {cyc}" if cyc else "")
+                    f"- **{t}**：{rows:,} 行，财年财季 {len(fy_opts)} 个{cyc_text}"
                 )
                 # 整池清空（通用）
                 if st.button(f"清空 {t} 数据池（全部）", key=f"clear_{t}"):
@@ -1257,16 +1275,16 @@ def main():
                     st.session_state["clear_result"] = msg
                     st.rerun()
 
-                # 历史Union：按财年财季清空
+                # 历史Union：按财年财季清空（仅点按钮时才加载全量数据）
                 if t == "历史Union":
-                    hu_fy_opts = sorted(df["财年财季"].dropna().unique().tolist())
                     hu_sel_fy = st.multiselect(
-                        "选择要清空的财年财季", hu_fy_opts, default=[], key="clear_hu_fy"
+                        "选择要清空的财年财季", fy_opts, default=[], key="clear_hu_fy"
                     )
                     if st.button("清空选中财年财季", key="clear_hu_btn"):
                         if not hu_sel_fy:
                             st.warning("请先选择要清空的财年财季。")
                         else:
+                            df = load_bucket("历史Union")
                             remove_mask = df["财年财季"].isin(hu_sel_fy)
                             removed = int(remove_mask.sum())
                             save_bucket("历史Union", df[~remove_mask].reset_index(drop=True))
@@ -1276,20 +1294,19 @@ def main():
                             )
                             st.rerun()
 
-                # FCST：按财年财季 + FCST Cycle 清空
+                # FCST：按财年财季 + FCST Cycle 清空（仅点按钮时才加载全量数据）
                 if t == "FCST":
-                    fcst_fy_opts = sorted(df["财年财季"].dropna().unique().tolist())
-                    fcst_cyc_opts = sorted(df["FCST Cycle"].dropna().unique().tolist())
                     fcst_sel_fy = st.multiselect(
-                        "选择要清空的财年财季", fcst_fy_opts, default=[], key="clear_fcst_fy"
+                        "选择要清空的财年财季", fy_opts, default=[], key="clear_fcst_fy"
                     )
                     fcst_sel_cyc = st.multiselect(
-                        "选择要清空的 FCST Cycle", fcst_cyc_opts, default=[], key="clear_fcst_cyc"
+                        "选择要清空的 FCST Cycle", cyc_opts, default=[], key="clear_fcst_cyc"
                     )
                     if st.button("清空选中财年财季+Cycle", key="clear_fcst_btn"):
                         if not fcst_sel_fy or not fcst_sel_cyc:
                             st.warning("请同时选择财年财季与 FCST Cycle。")
                         else:
+                            df = load_bucket("FCST")
                             remove_mask = df["财年财季"].isin(fcst_sel_fy) & df["FCST Cycle"].isin(fcst_sel_cyc)
                             removed = int(remove_mask.sum())
                             save_bucket("FCST", df[~remove_mask].reset_index(drop=True))
