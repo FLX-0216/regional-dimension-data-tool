@@ -24,6 +24,7 @@ import io
 import re
 import time
 import uuid
+from datetime import datetime
 import pandas as pd
 import pyarrow.parquet as pq
 import plotly.express as px
@@ -58,6 +59,31 @@ def _bucket_mtime(upload_type):
     """数据桶文件 mtime，用于让缓存随数据上传/清理自动失效。"""
     p = bucket_path(upload_type)
     return os.path.getmtime(p) if os.path.exists(p) else 0
+
+
+def _invalidate_fcst_cache():
+    """数据桶或 Mapping 发生任何写入后调用，强制 FCST 分析相关缓存失效。
+
+    作用：左侧数据源（上传 / 删除指定 Cycle / 清空数据池 / 重传）变化后，
+    右侧 FCST 分析（KPI 看板、层级树表、by Week 趋势）立即反映最新数据，
+    不再出现“旧周次残留（如删掉的 Week2-5 还在）”或“重传后不更新”的问题。
+
+    同时清掉两层缓存：
+    - session_state 中上次计算结果的缓存（key 含桶 mtime）
+    - @st.cache_data 缓存的底层聚合数据（_load_fcst_analysis_data）
+    """
+    try:
+        st.session_state.pop("fcst_cache_key", None)
+    except Exception:  # noqa
+        pass
+    try:
+        st.session_state.pop("fcst_result", None)
+    except Exception:  # noqa
+        pass
+    try:
+        _load_fcst_analysis_data.clear()
+    except Exception:  # noqa
+        pass
 
 
 def week_sort_key(w):
@@ -156,6 +182,8 @@ def save_bucket(upload_type, df):
         if df_pq[col].dtype == object:
             df_pq[col] = df_pq[col].fillna("").astype(str)
     _atomic_write_parquet(df_pq, bucket_path(upload_type))
+    # 任何数据桶写入都让 FCST 分析缓存失效，保证右侧实时刷新
+    _invalidate_fcst_cache()
 
 
 def load_mapping():
@@ -172,6 +200,8 @@ def save_mapping(df):
         if df_pq[col].dtype == object:
             df_pq[col] = df_pq[col].fillna("").astype(str)
     _atomic_write_parquet(df_pq, MAPPING_FILE)
+    # Mapping 写入同样影响 FCST 分析的 DG%/Quota%/YOY% 计算，需失效缓存
+    _invalidate_fcst_cache()
 
 
 def apply_mapping(df, mapping_df):
@@ -882,10 +912,29 @@ def _render_kpi_dashboard(ttl):
 def render_fcst_analysis():
     """右侧 Tab1：FCST 分析（横向按钮筛选 + 实时联动 + 层级树表下钻）。"""
     st.subheader("FCST 分析")
-    st.markdown(
-        "<small>选择财年财季、当前/对比 FCST Cycle 与范围，看板与下钻实时联动。</small>",
-        unsafe_allow_html=True,
-    )
+    # 刷新按钮 + 数据版本：左侧数据源变更后若右侧未自动刷新，可手动强制刷新
+    _rf_c1, _rf_c2 = st.columns([5, 1])
+    with _rf_c1:
+        st.markdown(
+            "<small>选择财年财季、当前/对比 FCST Cycle 与范围，看板与下钻实时联动。</small>",
+            unsafe_allow_html=True,
+        )
+        try:
+            _fcst_mt = _bucket_mtime("FCST")
+            if _fcst_mt:
+                _mt_str = datetime.fromtimestamp(_fcst_mt).strftime("%Y-%m-%d %H:%M:%S")
+                st.caption(f"FCST 数据版本（最后写入）：{_mt_str}")
+        except Exception:  # noqa
+            pass
+    with _rf_c2:
+        if st.button(
+            "🔄 刷新 FCST 数据",
+            key="fcst_refresh",
+            use_container_width=True,
+            help="左侧数据源变更后若右侧未自动刷新，点此强制刷新：看板 / 树表 / by Week 趋势",
+        ):
+            _invalidate_fcst_cache()
+            st.rerun()
 
     # 缩小 FCST 分析区域内按钮尺寸，使筛选控件更紧凑
     st.markdown(
