@@ -1,4 +1,4 @@
-﻿"""
+"""
 区域维度数据统一处理与按维度导出 Streamlit 应用
 
 架构（第 8 轮需求）：
@@ -14,6 +14,12 @@
 - 右侧主区域：点击【运行筛选/透视】后展示明细预览、图表与导出按钮。
 """
 import os
+
+# Streamlit 在 ScriptRunner 线程执行脚本；pandas 3 + pyarrow 25 在首次于非主线程
+# 导入 pyarrow 后再由其他线程做 Arrow 分配时可能触发 mimalloc SIGSEGV。
+# 提前强制使用 system 内存池，可规避该崩溃（apache/arrow#50471）。
+os.environ.setdefault("ARROW_DEFAULT_MEMORY_POOL", "system")
+
 import io
 import time
 import uuid
