@@ -934,7 +934,13 @@ def render_fcst_analysis():
             sub_region = sub_sel
 
     # 用 session_state 缓存上次计算结果，左侧导出设置变化时不重新算 FCST
-    cache_key = f"{fy}|{cur_cycle}|{cmp_cycle}|{scope}|{sub_region}|{_mapping_mtime()}"
+    # 注意：cache_key 必须包含三个数据桶的 mtime，否则上传/清理数据后
+    # session 缓存仍会返回旧的（=0 的）结果，表现为"选了 Week10 还是 0"。
+    cache_key = (
+        f"{fy}|{cur_cycle}|{cmp_cycle}|{scope}|{sub_region}"
+        f"|{_mapping_mtime()}"
+        f"|{_bucket_mtime('FCST')}|{_bucket_mtime('DG&Quota')}|{_bucket_mtime('历史Union')}"
+    )
     if st.session_state.get("fcst_cache_key") != cache_key:
         with st.spinner("正在计算 FCST 分析…"):
             res = compute_fcst(fy, cur_cycle, cmp_cycle, scope, sub_region)
