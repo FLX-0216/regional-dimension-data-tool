@@ -35,6 +35,7 @@ from ops_data_processor import (
     merge_all,
     FCST_FAMILY,
     SOURCE_GROUPS,
+    add_core_memoline,
 )
 
 st.set_page_config(page_title="区域维度数据处理与导出", layout="wide")
@@ -486,6 +487,9 @@ def _load_fcst_analysis_data(fy, _mapping_mtime_value, _fcst_mt, _dgq_mt, _hist_
     fcst = load_bucket("FCST")
     mapping_df = load_mapping()
     fcst = apply_mapping(fcst, mapping_df)
+    # 需求 3：确保 Core/Memoline 列存在（兼容旧桶未含该列的情况）
+    if "Core/Memoline" not in fcst.columns:
+        fcst = add_core_memoline(fcst)
     fcst = fcst[fcst["财年财季"] == fy].copy()
     fcst["业绩考核USDK"] = pd.to_numeric(fcst["业绩考核USDK"], errors="coerce").fillna(0)
     for c in ["服务大区", "服务战区", "POS_APOS", "物料通路", "产线大类", "客户名称"]:
@@ -1020,6 +1024,9 @@ def render_fcst_analysis():
     # 所选财年财季 FCST by Week 趋势图
     _render_fcst_trend(fy, scope, sub_region)
 
+    # Core MIX 分析（多维度交互）
+    _render_core_mix(fy, scope, sub_region, cur_cycle)
+
 
 def _render_fcst_trend(fy, scope, sub_region):
     """在所选财年财季下，按 FCST Cycle（Week）以表格式展示趋势：
@@ -1044,7 +1051,9 @@ def _render_fcst_trend(fy, scope, sub_region):
         st.info("所选范围内无 FCST 数据，无法绘制趋势。")
         return
 
-    df["客户名称"] = df["客户名称"].fillna("").astype(str).replace("", "（未命名）")
+    # 仅 strip，保留空客户名（HB/JV 等数据源无客户的行仍计入父行总额，
+    # 但大客户明细中会被剔除，不展示空名行）
+    df["客户名称"] = df["客户名称"].fillna("").astype(str).str.strip()
 
     def _week_key(w):
         nums = re.findall(r"\d+", str(w))
@@ -1056,13 +1065,22 @@ def _render_fcst_trend(fy, scope, sub_region):
         return src_df.groupby("FCST Cycle")["业绩考核USDK"].sum().reindex(weeks, fill_value=0).values
 
     def get_big_customers(pos_df, threshold):
+        # 剔除客户名称为空的行（如 HB/JV 等数据源无客户的行），仅影响大客户明细展示；
+        # 这些金额已计入父行 TTL/APOS/POS 总额，不受剔除影响。
+        pos_df = pos_df[pos_df["客户名称"].astype(str).str.strip() != ""]
+        if pos_df.empty:
+            return []
         cust_cycle = pos_df.groupby(["客户名称", "FCST Cycle"])["业绩考核USDK"].sum().reset_index()
+        # 判定标准：任一 Week 该客户合计金额 > 阈值（默认 500 = 500K USDK）即列为大客户
         big = cust_cycle[cust_cycle["业绩考核USDK"] > threshold]["客户名称"].unique().tolist()
         cust_total = pos_df.groupby("客户名称")["业绩考核USDK"].sum()
+        # 按总合计金额降序排列，便于优先展示头部客户
         big = sorted(big, key=lambda c: cust_total.get(c, 0), reverse=True)
         if not big:
+            # 无客户达标时，回退展示金额最高的前 10 个客户
             big = cust_total.sort_values(ascending=False).head(10).index.tolist()
-        return big[:15]
+        # 注意：不再截断前 15 名，保证满足阈值的大客户完整列出（如山东高速…）
+        return big
 
     # 阈值：数据源单位为 USDK，500K 对应数值 500
     st.markdown("<small>大客户判定：任一 Week 金额 &gt; 阈值（默认 500，即 500K USDK）。</small>", unsafe_allow_html=True)
@@ -1196,6 +1214,99 @@ def _render_fcst_trend(fy, scope, sub_region):
         unsafe_allow_html=True,
     )
     components.html(html, height=110 + len(rows_html) * 34, scrolling=True)
+
+
+def _render_core_mix(fy, scope, sub_region, cur_cycle):
+    """Core MIX 分析模块：Core 金额 ÷ (Core + Memoline) 金额，支持多维度交互下钻。
+
+    - 维度：服务大区 / 服务战区 / 产线名称 / 产品大类 / SPL名称（可多选，逐层下钻）
+    - 数据范围：当前 FCST Cycle 或 全部周合计
+    - Core/Memoline 为空（其他）的行不计入分子分母
+    """
+    fcst, _, _, _, _ = _load_fcst_analysis_data(
+        fy, _mapping_mtime(), _bucket_mtime("FCST"), _bucket_mtime("DG&Quota"), _bucket_mtime("历史Union")
+    )
+    df = fcst.copy()
+    if scope != "TTL":
+        df = df[df["服务大区"] == scope]
+    if sub_region:
+        df = df[df["服务战区"] == sub_region]
+    df = df[df["POS_APOS"].isin(["APOS", "POS"])]
+    if df.empty:
+        st.info("所选范围内无 FCST 数据，无法计算 Core MIX。")
+        return
+
+    st.subheader("Core MIX 分析")
+    st.markdown(
+        "<small>Core MIX = Core 金额 ÷ (Core + Memoline) 金额；维度可交互选择，支持多维度下钻。</small>",
+        unsafe_allow_html=True,
+    )
+
+    cycle_scope = st.radio(
+        "数据范围",
+        [f"当前 Cycle（{cur_cycle}）", "全部周合计"],
+        horizontal=True,
+        key="core_mix_cycle_scope",
+        index=0,
+    )
+    if cycle_scope.startswith("当前"):
+        df = df[df["FCST Cycle"] == cur_cycle]
+
+    DIM_OPTIONS = ["服务大区", "服务战区", "产线名称", "产品大类", "SPL名称"]
+    dims = st.multiselect(
+        "分析维度（可多选，逐层下钻）",
+        DIM_OPTIONS,
+        default=["服务大区"],
+        key="core_mix_dims",
+    )
+    if not dims:
+        st.warning("请至少选择一个分析维度。")
+        return
+
+    # 仅 Core/Memoline 有值（Core 或 Memoline）的行参与计算；空值不计入分子分母
+    valid = df[df["Core/Memoline"].isin(["Core", "Memoline"])].copy()
+    valid["_amt"] = pd.to_numeric(valid["业绩考核USDK"], errors="coerce").fillna(0)
+    valid["_core"] = valid["_amt"].where(valid["Core/Memoline"] == "Core", 0.0)
+    valid["_memo"] = valid["_amt"].where(valid["Core/Memoline"] == "Memoline", 0.0)
+
+    grp = valid.groupby(dims, dropna=False).agg(_core=("_core", "sum"), _memo=("_memo", "sum")).reset_index()
+    grp["Core金额"] = grp["_core"]
+    grp["Memoline金额"] = grp["_memo"]
+    denom = grp["_core"] + grp["_memo"]
+    grp["Core MIX%"] = (grp["_core"] / denom * 100).round(0)
+    grp["_label"] = grp[dims].astype(str).fillna("(空)").agg(" / ".join, axis=1)
+    grp = grp.sort_values("_core", ascending=False).reset_index(drop=True)
+
+    total_core = float(grp["_core"].sum())
+    total_memo = float(grp["_memo"].sum())
+    total_mix = (total_core / (total_core + total_memo) * 100) if (total_core + total_memo) else 0.0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("总体 Core MIX", f"{total_mix:.0f}%")
+    c2.metric("Core 金额合计", f"{int(round(total_core)):,}")
+    c3.metric("Memoline 金额合计", f"{int(round(total_memo)):,}")
+
+    if grp.empty:
+        st.info("该范围内无 Core/Memoline 数据。")
+        return
+
+    fig = px.bar(
+        grp, x="_label", y="Core MIX%",
+        labels={"_label": "维度", "Core MIX%": "Core MIX (%)"},
+        text=grp["Core MIX%"].astype(int).astype(str) + "%",
+        height=max(320, 40 * len(grp) + 120),
+    )
+    fig.add_hline(
+        y=total_mix, line_dash="dash", line_color="#d93025",
+        annotation_text=f"总体 {total_mix:.0f}%", annotation_position="top right",
+    )
+    fig.update_traces(marker_color="#1a73e8")
+    fig.update_layout(xaxis_tickangle=-30, margin=dict(l=20, r=20, t=30, b=80))
+    st.plotly_chart(fig, use_container_width=True)
+
+    show_cols = ["_label", "Core金额", "Memoline金额", "Core MIX%"]
+    tbl = grp[show_cols].rename(columns={"_label": "维度"})
+    st.dataframe(tbl, use_container_width=True, hide_index=True)
 
 
 def main():
@@ -1530,6 +1641,8 @@ def main():
         progress.progress(0.35, text="正在应用 Mapping…")
         mapping_df = load_mapping()
         all_data = apply_mapping(all_data, mapping_df)
+        # 需求 3：导出数据补充 Core/Memoline 列（兼容旧桶）
+        all_data = add_core_memoline(all_data)
     
         progress.progress(0.4, text="正在按筛选条件过滤…")
         sub = all_data.copy()

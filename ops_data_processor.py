@@ -13,8 +13,8 @@ import numpy as np
 FINAL_COLUMNS = [
     "财年财季", "数据类别", "是否业绩考核", "是否FCST",
     "服务管理省份", "服务大区", "服务战区", "产线类型", "产线名称",
-    "产品大类", "SPL名称", "IDGISG", "销售模式", "POS_APOS",
-    "物料通路", "REL纵队", "业绩考核USDK", "项目/商机编号",
+    "产品大类", "SPL名称", "IDGISG", "销售模式",     "POS_APOS",
+    "物料通路", "Core/Memoline", "REL纵队", "业绩考核USDK", "项目/商机编号",
     "客户名称", "代理名称", "项目名称", "签约主体", "IB_NEW",
     "PM/sales", "Sales", "产线+通路"
 ]
@@ -63,6 +63,37 @@ def norm_channel(val):
     s = str(val)
     s = s.replace("SDA-新阳光", "SDA").replace("Softbundle", "STB")
     return s
+
+
+def compute_core_memoline(pos_apos, material_channel):
+    """计算 Core/Memoline 分类列（需求 3）。
+
+    规则：
+    - POS_APOS == APOS                          → "Core"
+    - POS_APOS == POS 且 物料通路 ∈ {HB, STB, JV} → "Core"
+    - POS_APOS == POS 且 物料通路 == SDA          → "Memoline"
+    - 其他情况                                  → 空字符串
+    """
+    pa = str(pos_apos).strip().upper()
+    ch = str(material_channel).strip().upper()
+    if pa == "APOS":
+        return "Core"
+    if pa == "POS":
+        if ch in ("HB", "STB", "JV"):
+            return "Core"
+        if ch == "SDA":
+            return "Memoline"
+    return ""
+
+
+def add_core_memoline(df):
+    """给 DataFrame 增加/覆盖 Core/Memoline 列。"""
+    df = df.copy()
+    df["Core/Memoline"] = [
+        compute_core_memoline(pa, ch)
+        for pa, ch in zip(df.get("POS_APOS", []), df.get("物料通路", []))
+    ]
+    return df
 
 
 def _apply_hw_chnl(out, df):
@@ -725,6 +756,9 @@ def post_process(merged):
     # 第 4 条：物料通路 / 产线+通路 名称归一化
     for col in ["物料通路", "产线+通路"]:
         merged[col] = merged[col].apply(norm_channel)
+
+    # 需求 3：增加 Core/Memoline 分类列（在 FINAL_ORDER 子集之前计算，确保被保留）
+    merged = add_core_memoline(merged)
 
     merged = merged.reset_index(drop=True)
     return merged
