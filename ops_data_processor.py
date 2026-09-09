@@ -546,7 +546,7 @@ def process_t3_fcst(df):
             rows.append(r)
 
     if rows:
-        out = pd.DataFrame(rows)[FINAL_COLUMNS]
+        out = add_core_memoline(pd.DataFrame(rows))[FINAL_COLUMNS]
     else:
         out = pd.DataFrame(columns=FINAL_COLUMNS)
     return out
@@ -793,7 +793,7 @@ def merge_all(files_or_paths, fcst_cycle=None, force_category=None):
             continue
         try:
             processed = PROCESSORS[category](df)
-            processed = processed[FINAL_COLUMNS].copy()
+            processed = add_core_memoline(processed)[FINAL_COLUMNS].copy()
             # 源表标签：记录每行来自哪个源表，便于按类型拆分展示
             # （历史Union 与 QTD 的“数据类别”同为 ACT，必须靠源表区分）。
             processed["源表"] = category
