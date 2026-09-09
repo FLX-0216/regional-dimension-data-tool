@@ -1309,9 +1309,34 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     st.dataframe(tbl, use_container_width=True, hide_index=True)
 
 
+def _auto_refresh_on_data_change():
+    """近实时自动刷新（零服务器模式）：每 5 秒检测各数据桶文件 mtime，
+    一旦 OneDrive 把新副本同步到本机（mtime 变化），自动整页重载，
+    使左侧上传/清理后右侧无需手动点刷新即可看到最新数据。
+    st.fragment(run_every=...) 在 streamlit>=1.38 可用；旧版本自动降级为仅手动刷新。
+    """
+    cur = {t: _bucket_mtime(t) for t in UPLOAD_TYPES}
+    prev = st.session_state.get("_auto_refresh_mtimes")
+    if prev is None:
+        st.session_state["_auto_refresh_mtimes"] = cur
+        return
+    if cur != prev:
+        st.session_state["_auto_refresh_mtimes"] = cur
+        st.rerun()
+    st.caption("🔄 数据自动刷新已开启：OneDrive 同步到新数据后将自动更新本页")
+
+
+# streamlit>=1.38 才有 st.fragment(run_every=...)；旧版本降级为无自动刷新（保留手动按钮）
+_AUTO_REFRESH_OK = hasattr(st, "fragment")
+if _AUTO_REFRESH_OK:
+    _auto_refresh_on_data_change = st.fragment(run_every=5)(_auto_refresh_on_data_change)
+
+
 def main():
     _cleanup_stale_tmp()
     ensure_buckets_from_master()
+    # 近实时自动刷新：OneDrive 同步到新数据后自动重载（仅作检测，不阻塞主流程）
+    _auto_refresh_on_data_change()
 
     # ===================== 左侧边栏：上传 / 处理 / 导出设置 =====================
     with st.sidebar:
