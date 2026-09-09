@@ -1466,16 +1466,24 @@ def main():
             if st.session_state.get("clear_result"):
                 st.success(st.session_state["clear_result"])
                 st.session_state["clear_result"] = None
+            st.caption(
+                "「本机文件更新于」是你这台电脑上数据文件的最后修改时间；"
+                "若与上传人看到的不一致，说明 OneDrive 还没把最新数据同步到你的电脑——"
+                "请等待同步完成，或右键该文件夹「始终保留在此设备」。"
+            )
             for t in UPLOAD_TYPES:
                 rows = _bucket_row_count(t)
+                mt = _bucket_mtime(t)
+                mt_str = datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M:%S") if mt else "—"
                 if rows == 0:
-                    st.markdown(f"- **{t}**：（空）")
+                    st.markdown(f"- **{t}**：（空），本机文件更新于 `{mt_str}`")
                     continue
                 fy_opts = _bucket_distinct(t, "财年财季")
                 cyc_opts = _bucket_distinct(t, "FCST Cycle") if t == "FCST" else []
                 cyc_text = f"，FCST 周版本 {cyc_opts}" if cyc_opts else ""
                 st.markdown(
-                    f"- **{t}**：{rows:,} 行，财年财季 {len(fy_opts)} 个{cyc_text}"
+                    f"- **{t}**：{rows:,} 行，财年财季 {len(fy_opts)} 个{cyc_text}，"
+                    f"本机文件更新于 `{mt_str}`"
                 )
                 # 整池清空（通用）
                 if st.button(f"清空 {t} 数据池（全部）", key=f"clear_{t}"):
