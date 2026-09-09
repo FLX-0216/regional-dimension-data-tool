@@ -48,7 +48,46 @@ WEEK_OPTIONS = [f"Week{i}" for i in range(1, 16)]
 UPLOAD_TYPES = ["历史Union", "QTD", "FCST", "DG&Quota"]
 EXCEL_MAX_ROWS = 1048576  # Excel 单 sheet 最大行数
 MAPPING_FILE = os.path.join(ROOT, "mapping_table.parquet")
-MAPPING_COLS = ["产线大类", "纯产线大类", "非纯产线大类"]
+MAPPING_COLS = ["产线大类", "纯产线大类", "非纯产线大类", "展示顺序"]
+
+
+def _pos_display_label(pos):
+    """FCST 分析展示层把 APOS/POS 替换为 Solutions/Services（数据源字段不变）。"""
+    if pos == "APOS":
+        return "Solutions"
+    if pos == "POS":
+        return "Services"
+    return pos
+
+
+def _is_dark_theme():
+    """检测 Streamlit 当前主题（用户可在应用内切换黑色/深色）。
+
+    components.html 渲染的是隔离 iframe，不会继承 Streamlit 的主题，
+    因此不能仅靠 CSS @media (prefers-color-scheme) —— 当 OS 是浅色、
+    用户在 Streamlit 里切到黑色时后者不生效。这里用 st.get_option 读取
+    运行时的 theme.base，作为显式 class 注入到 iframe 内容里。
+    """
+    try:
+        base = str(st.get_option("theme.base")).lower()
+        return base == "dark"
+    except Exception:  # noqa
+        return False
+
+
+def _theme_cls():
+    return "theme-dark" if _is_dark_theme() else "theme-light"
+
+
+def _esc_html(s):
+    """HTML 转义，避免维度值中的特殊字符破坏表格。"""
+    return (
+        str(s)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
 def bucket_path(upload_type):
@@ -206,13 +245,15 @@ def save_mapping(df):
 
 
 def apply_mapping(df, mapping_df):
-    """根据 Mapping 表添加/更新三列：产线大类、纯产线大类、非纯产线大类。
+    """根据 Mapping 表添加/更新列：产线大类、纯产线大类、非纯产线大类、展示顺序。
 
     规则：
     - 产线大类：产线+通路 匹配 Mapping 第一列 → 返回第二列。
     - 纯产线大类：产线名称 匹配 Mapping 第一列 → 返回第二列。
     - 非纯产线大类：POS_APOS=POS 且 物料通路 为 HB/STB/JV 时，返回 物料通路；
       否则返回 纯产线大类。
+    - 展示顺序：Mapping 含第三列时，按第一列映射到数值顺序，用于 FCST 分析
+      中产线大类升序展示；无该列时返回 NaN，后续按名称兜底排序。
     """
     out = df.copy()
     for col in MAPPING_COLS:
@@ -237,6 +278,20 @@ def apply_mapping(df, mapping_df):
         return pure if pure else None
 
     out["非纯产线大类"] = out.apply(_non_pure, axis=1)
+
+    # 展示顺序：兼容旧 Mapping（无该列）和新 Mapping（第三列为展示顺序）
+    if "展示顺序" in mapping_df.columns:
+        order_col = "展示顺序"
+    elif len(mapping_df.columns) >= 3:
+        order_col = mapping_df.columns[2]
+    else:
+        order_col = None
+    if order_col:
+        order_dict = mapping_df.set_index(key_col)[order_col].to_dict()
+        out["展示顺序"] = pd.to_numeric(
+            out["产线+通路"].astype(str).str.strip().map(order_dict),
+            errors="coerce",
+        )
     return out
 
 
@@ -587,10 +642,11 @@ def compute_fcst(fy, cur_cycle, cmp_cycle, scope, sub_region):
 
 
 def _build_section(cur, cmp, dg_map, q_map, h_map, h_map_pl):
-    """按 TTL → APOS/POS → 产线大类 → 大区 → 客户 构建层级树表。
+    """按 TTL → Solutions/Services → 产线大类 → 大区 → 客户 构建层级树表。
 
-    - TTL/APOS/POS 汇总行：计算 DG%/Quota%/YOY%。
+    - TTL/Solutions/Services 汇总行：计算 DG%/Quota%/YOY%。
     - 产线大类/大区/客户行：只展示 当前FCST、上版FCST、WTW，不计算比率。
+    - 产线大类按 Mapping 中的「展示顺序」升序排列（无顺序时按名称兜底）。
     - 返回的 DataFrame 额外携带 id / parent_id / level / label，供前端树表折叠使用。
     """
     keys = ["服务大区", "服务战区", "POS_APOS", "物料通路"]
@@ -658,7 +714,7 @@ def _build_section(cur, cmp, dg_map, q_map, h_map, h_map_pl):
         pos_id = f"pos_{pos_label}"
         c_pos = cur[cur["POS_APOS"] == pos_label]
         m_pos = cmp[cmp["POS_APOS"] == pos_label]
-        add_row(pos_id, "", 0, pos_label, c_pos, m_pos, calc_ratio=True, calc_yoy=True)
+        add_row(pos_id, "", 0, _pos_display_label(pos_label), c_pos, m_pos, calc_ratio=True, calc_yoy=True)
         # 子行 unique 用 (当前 ∪ 对比) 并集，保证"对比版有但当前版没了"的
         # 分类（如被砍掉的产线大类、流失的大区）也能渲染出来，做到
         # 父行金额 = 所有子行金额之和，所有 WTW 差异都看得见。
@@ -666,7 +722,31 @@ def _build_section(cur, cmp, dg_map, q_map, h_map, h_map_pl):
         # 避免未匹配行被静默漏掉导致父子对不上。
         c_pls = c_pos["产线大类"].fillna("（未匹配）").replace("", "（未匹配）")
         m_pls = m_pos["产线大类"].fillna("（未匹配）").replace("", "（未匹配）")
-        for pl in sorted(set(c_pls) | set(m_pls)):
+        # 产线大类按 Mapping 展示顺序升序；未匹配放到最后
+        all_pls = list(set(c_pls) | set(m_pls))
+        if all_pls:
+            c_order = (
+                c_pos.groupby("产线大类")["展示顺序"].min()
+                if "展示顺序" in c_pos.columns
+                else pd.Series(dtype=float)
+            )
+            m_order = (
+                m_pos.groupby("产线大类")["展示顺序"].min()
+                if "展示顺序" in m_pos.columns
+                else pd.Series(dtype=float)
+            )
+            def _pl_sort_key(pl):
+                if pl == "（未匹配）":
+                    return (999999, pl)
+                o = min(
+                    c_order.get(pl, float("nan")) if isinstance(c_order, pd.Series) else float("nan"),
+                    m_order.get(pl, float("nan")) if isinstance(m_order, pd.Series) else float("nan"),
+                )
+                if pd.isna(o):
+                    return (999998, pl)
+                return (int(o), pl)
+            all_pls = sorted(all_pls, key=_pl_sort_key)
+        for pl in all_pls:
             pl_id = f"{pos_id}_pl_{pl}"
             c_pl = c_pos[c_pls == pl]
             m_pl = m_pos[m_pls == pl]
@@ -775,29 +855,63 @@ def _build_tree_html(df):
 
     header_html = "".join([f"<th>{h}</th>" for h in headers])
     table_html = (
+        f'<div class="{_theme_cls()}">'
         '<table class="tree-table"><thead><tr>' + header_html + '</tr></thead><tbody>'
         + "".join(rows_html) + '</tbody></table>'
+        '</div>'
     )
 
     css = """
     <style>
-    .tree-table { width: 100%; border-collapse: collapse; font-family: "Source Sans Pro", sans-serif; font-size: 14px; color: #31333F; }
-    .tree-table th { position: sticky; top: 0; text-align: left; padding: 10px 12px; border-bottom: 1px solid #e6e6e6; background: #f7f7f8; font-weight: 600; }
-    .tree-table td { padding: 8px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+    .tree-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-family: "Source Sans Pro", sans-serif; font-size: 14px; color: #31333F; }
+    .tree-table * { box-sizing: border-box; }
+    .tree-table th, .tree-table td { padding: 8px 10px; border-bottom: 1px solid #e6e6e6; vertical-align: middle; }
+    .tree-table th { position: sticky; top: 0; text-align: left; background: #f7f7f8; font-weight: 600; border-bottom: 2px solid #cfcfcf; z-index: 2; }
     .tree-table td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    /* 数值列（当前FCST/上版FCST/WTW/DG%/Quota%/YOY%）表头与数据同向右对齐，避免串位 */
+    .tree-table th:nth-child(n+2) { text-align: right; }
     .tree-table td.up { color: #0f9d00; font-weight: 600; }
     .tree-table td.down { color: #d93025; font-weight: 600; }
+    .tree-table th:nth-child(1), .tree-table td:nth-child(1) { width: 32%; min-width: 260px; }
+    .tree-table th:nth-child(n+2), .tree-table td:nth-child(n+2) { width: 11.333%; }
     .tree-label-inner { display: flex; align-items: center; gap: 6px; }
     .tree-toggle { cursor: pointer; width: 16px; display: inline-flex; align-items: center; justify-content: center; color: #666; user-select: none; font-size: 12px; }
     .tree-toggle:hover { color: #000; }
     .tree-spacer { width: 16px; display: inline-block; }
-    .tree-text { white-space: nowrap; }
-    .tree-row:hover { background: #fafafa; }
-    .tree-row.level-0 { font-weight: 700; background: #fff; border-left: 4px solid #ff4b4b; }
-    .tree-row.level-1 { font-weight: 500; color: #444; border-left: 4px solid #83c9ff; }
-    .tree-row.level-2 { color: #555; border-left: 4px solid #e0e0e0; }
-    .tree-row.level-3 { color: #666; border-left: 4px solid #f0f0f0; }
+    .tree-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tree-row:hover { background: #f2f4f8; }
+    .tree-row.level-0 { font-weight: 700; background: #fff; }
+    .tree-row.level-0 td:first-child { box-shadow: inset 4px 0 #ff4b4b; }
+    .tree-row.level-1 { font-weight: 600; color: #333; }
+    .tree-row.level-1 td:first-child { box-shadow: inset 4px 0 #83c9ff; }
+    .tree-row.level-2 { color: #444; }
+    .tree-row.level-2 td:first-child { box-shadow: inset 4px 0 #cfcfcf; }
+    .tree-row.level-3 { color: #555; }
+    .tree-row.level-3 td:first-child { box-shadow: inset 4px 0 #eaeaea; }
     .tree-row.level-2 .tree-text, .tree-row.level-3 .tree-text { font-size: 12px; }
+    /* 深色模式（显式 class：Streamlit 应用内切黑色主题时也能生效，不依赖 OS prefers-color-scheme） */
+    .theme-dark .tree-table { color: #f5f5f5; background: #0e1117; }
+    .theme-dark .tree-table th { background: #262730; color: #f5f5f5; border-bottom-color: #48484f; }
+    .theme-dark .tree-table td { border-bottom-color: #36363f; }
+    .theme-dark .tree-row.level-0 { background: #171922; }
+    .theme-dark .tree-row.level-1 { color: #ffffff; }
+    .theme-dark .tree-row.level-2 { color: #ededed; }
+    .theme-dark .tree-row.level-3 { color: #d6d6d6; }
+    .theme-dark .tree-toggle { color: #c4c4c4; }
+    .theme-dark .tree-toggle:hover { color: #ffffff; }
+    .theme-dark .tree-row:hover { background: #262732; }
+    @media (prefers-color-scheme: dark) {
+      .tree-table { color: #f5f5f5; }
+      .tree-table th { background: #262730; color: #f5f5f5; border-bottom-color: #48484f; }
+      .tree-table td { border-bottom-color: #36363f; }
+      .tree-row.level-0 { background: #171922; }
+      .tree-row.level-1 { color: #ffffff; }
+      .tree-row.level-2 { color: #ededed; }
+      .tree-row.level-3 { color: #d6d6d6; }
+      .tree-toggle { color: #c4c4c4; }
+      .tree-toggle:hover { color: #fff; }
+      .tree-row:hover { background: #262732; }
+    }
     </style>
     """
 
@@ -1032,8 +1146,9 @@ def _render_fcst_trend(fy, scope, sub_region):
     """在所选财年财季下，按 FCST Cycle（Week）以表格式展示趋势：
 
     - 列：口径 | Week1 | Week2 | ... | WeekN | Trend
-    - 行：TTL、APOS（可折叠）、APOS 大客户、POS（可折叠）、POS 大客户
+    - 行：TTL、Solutions（可折叠）、Services（可折叠）及各自大客户
     - 每个 Week 都显示金额；最右侧为对应 sparkline
+    - 默认折叠大客户明细，避免收起后下方大片留白
     """
     import re
     import streamlit.components.v1 as components
@@ -1066,7 +1181,7 @@ def _render_fcst_trend(fy, scope, sub_region):
 
     def get_big_customers(pos_df, threshold):
         # 剔除客户名称为空的行（如 HB/JV 等数据源无客户的行），仅影响大客户明细展示；
-        # 这些金额已计入父行 TTL/APOS/POS 总额，不受剔除影响。
+        # 这些金额已计入父行 TTL/Solutions/Services 总额，不受剔除影响。
         pos_df = pos_df[pos_df["客户名称"].astype(str).str.strip() != ""]
         if pos_df.empty:
             return []
@@ -1079,11 +1194,20 @@ def _render_fcst_trend(fy, scope, sub_region):
         if not big:
             # 无客户达标时，回退展示金额最高的前 10 个客户
             big = cust_total.sort_values(ascending=False).head(10).index.tolist()
-        # 注意：不再截断前 15 名，保证满足阈值的大客户完整列出（如山东高速…）
+        # 注意：不再截断前 15 名，保证满足阈值的大客户完整列出
         return big
 
+    st.subheader("FCST by Week 趋势")
+    c1, c2 = st.columns([4, 1])
+    with c1:
+        st.markdown(
+            "<small>每行展示各 Week 金额及趋势；Solutions / Services 行可点击 ▼ 折叠/展开其下客户。</small>",
+            unsafe_allow_html=True,
+        )
+    with c2:
+        show_customers = st.toggle("展开大客户明细", value=False, key="trend_show_cust")
+
     # 阈值：数据源单位为 USDK，500K 对应数值 500
-    st.markdown("<small>大客户判定：任一 Week 金额 &gt; 阈值（默认 500，即 500K USDK）。</small>", unsafe_allow_html=True)
     threshold = st.number_input(
         "大客户阈值",
         min_value=0,
@@ -1144,6 +1268,8 @@ def _render_fcst_trend(fy, scope, sub_region):
             f'{make_cells(pos_vals)}'
             f'<td class="trend">{sparkline(pos_vals, color)}</td></tr>'
         )
+        if not show_customers:
+            return
         for i, cust in enumerate(get_big_customers(pos_df, threshold)):
             vals = weekly_series(pos_df[pos_df["客户名称"] == cust])
             cust_color = cust_colors[i % len(cust_colors)]
@@ -1154,23 +1280,25 @@ def _render_fcst_trend(fy, scope, sub_region):
                 f'<td class="trend">{sparkline(vals, cust_color)}</td></tr>'
             )
 
-    # APOS + customers
-    build_group("apos", "APOS", df[df["POS_APOS"] == "APOS"], "#0068c9", True)
-    # POS + customers
-    build_group("pos", "POS", df[df["POS_APOS"] == "POS"], "#ff4b4b", False)
+    # Solutions + customers
+    build_group("apos", "Solutions", df[df["POS_APOS"] == "APOS"], "#0068c9", True)
+    # Services + customers
+    build_group("pos", "Services", df[df["POS_APOS"] == "POS"], "#ff4b4b", False)
 
     week_headers = "".join([f'<th class="num week-header">{w}</th>' for w in weeks])
     html = f"""
     <style>
     .trend-table-wrap {{ overflow-x: auto; }}
-    .trend-hier-table {{ width: 100%; border-collapse: collapse; font-family: "Source Sans Pro", sans-serif; font-size: 11px; color: #31333F; }}
-    .trend-hier-table th {{ position: sticky; top: 0; background: #f7f7f8; padding: 6px 4px; border-bottom: 1px solid #e0e0e0; font-weight: 600; text-align: right; white-space: nowrap; }}
-    .trend-hier-table th.label {{ text-align: left; min-width: 180px; }}
-    .trend-hier-table th.week-header {{ min-width: 58px; }}
-    .trend-hier-table th.trend {{ text-align: center; width: 90px; }}
-    .trend-hier-table td {{ padding: 5px 4px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }}
+    .trend-hier-table {{ width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-family: "Source Sans Pro", sans-serif; font-size: 11px; color: #31333F; }}
+    .trend-hier-table * {{ box-sizing: border-box; }}
+    .trend-hier-table th, .trend-hier-table td {{ padding: 5px 6px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }}
+    .trend-hier-table th {{ position: sticky; top: 0; background: #f7f7f8; font-weight: 600; white-space: nowrap; }}
+    .trend-hier-table th:nth-child(1) {{ text-align: left; width: 220px; min-width: 220px; }}
+    .trend-hier-table th:nth-child(n+2) {{ text-align: right; }}
+    .trend-hier-table th:nth-child(n+2):not(:last-child) {{ width: calc((100% - 310px) / {len(weeks)}); min-width: 58px; }}
+    .trend-hier-table th:last-child {{ width: 90px; text-align: center; }}
     .trend-hier-table td.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 10px; }}
-    .trend-hier-table td.label {{ white-space: nowrap; }}
+    .trend-hier-table td.label {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
     .trend-hier-table td.trend {{ text-align: center; }}
     .trend-hier-table .main-label {{ font-weight: 600; font-size: 12px; display: flex; align-items: center; gap: 5px; }}
     .trend-hier-table .sub-label {{ padding-left: 20px; font-size: 11px; color: #555; display: flex; align-items: center; gap: 5px; }}
@@ -1184,8 +1312,35 @@ def _render_fcst_trend(fy, scope, sub_region):
     .tree-toggle:hover {{ color: #000; }}
     .tree-spacer {{ width: 12px; display: inline-block; }}
     .spark-svg {{ width: 80px; height: 24px; display: block; margin: 0 auto; }}
+    /* 深色模式（显式 class：Streamlit 应用内切黑色主题时也能生效，不依赖 OS prefers-color-scheme） */
+    .theme-dark .trend-hier-table {{ color: #f5f5f5; }}
+    .theme-dark .trend-hier-table th {{ background: #262730; border-bottom-color: #48484f; color: #f5f5f5; }}
+    .theme-dark .trend-hier-table td {{ border-bottom-color: #36363f; }}
+    .theme-dark .trend-hier-table .row-main {{ background: #171922; }}
+    .theme-dark .trend-hier-table .row-cust {{ background: #1f212b; }}
+    .theme-dark .trend-hier-table .row-ttl .main-label {{ color: #ffffff; }}
+    .theme-dark .trend-hier-table .sub-label {{ color: #dcdcdc; }}
+    .theme-dark .trend-hier-table .row-apos .main-label {{ color: #6ab7ff; }}
+    .theme-dark .trend-hier-table .row-pos .main-label {{ color: #ff7a7a; }}
+    .theme-dark .tree-toggle {{ color: #c4c4c4; }}
+    .theme-dark .tree-toggle:hover {{ color: #ffffff; }}
+    .theme-dark .trend-hier-table tr:hover {{ background: #262732; }}
+    @media (prefers-color-scheme: dark) {{
+      .trend-hier-table {{ color: #f5f5f5; }}
+      .trend-hier-table th {{ background: #262730; border-bottom-color: #48484f; color: #f5f5f5; }}
+      .trend-hier-table td {{ border-bottom-color: #36363f; }}
+      .trend-hier-table .row-main {{ background: #171922; }}
+      .trend-hier-table .row-cust {{ background: #1f212b; }}
+      .trend-hier-table .row-ttl .main-label {{ color: #ffffff; }}
+      .trend-hier-table .sub-label {{ color: #dcdcdc; }}
+      .trend-hier-table .row-apos .main-label {{ color: #6ab7ff; }}
+      .trend-hier-table .row-pos .main-label {{ color: #ff7a7a; }}
+      .tree-toggle {{ color: #c4c4c4; }}
+      .tree-toggle:hover {{ color: #fff; }}
+      .trend-hier-table tr:hover {{ background: #262732; }}
+    }}
     </style>
-    <div class="trend-table-wrap">
+    <div class="trend-table-wrap {_theme_cls()}">
     <table class="trend-hier-table">
     <thead><tr><th class="label">口径</th>{week_headers}<th class="trend">Trend</th></tr></thead>
     <tbody>{"".join(rows_html)}</tbody>
@@ -1208,21 +1363,21 @@ def _render_fcst_trend(fy, scope, sub_region):
     </script>
     """
 
-    st.subheader("FCST by Week 趋势")
-    st.markdown(
-        "<small>每行展示各 Week 金额及趋势；APOS / POS 行可点击 ▼ 折叠/展开其下客户。</small>",
-        unsafe_allow_html=True,
-    )
-    components.html(html, height=110 + len(rows_html) * 34, scrolling=True)
+    # 折叠大客户明细时只保留 TTL + Solutions + Services 三行，避免大片留白
+    visible_rows = len(rows_html) if show_customers else 3
+    components.html(html, height=110 + visible_rows * 34, scrolling=True)
 
 
 def _render_core_mix(fy, scope, sub_region, cur_cycle):
-    """Core MIX 分析模块：Core 金额 ÷ (Core + Memoline) 金额，支持多维度交互下钻。
+    """Core MIX 棋盘格分析：Core 金额 ÷ (Core + Memoline) 金额。
 
-    - 维度：服务大区 / 服务战区 / 产线名称 / 产品大类 / SPL名称（可多选，逐层下钻）
-    - 数据范围：当前 FCST Cycle 或 全部周合计
-    - Core/Memoline 为空（其他）的行不计入分子分母
+    - 纵向/横向维度可交互选择（大区、区域、纯产线大类、产线名称、产品大类、SPL）。
+    - 行：纵向维度值按 Core MIX 降序；超过总体 Core MIX 的维度下方用绿色虚线分隔。
+    - 列：横向维度值 + 汇总 Core MIX 列。
+    - 单元格颜色按 Core MIX 占比深浅区分。
     """
+    import streamlit.components.v1 as components
+
     fcst, _, _, _, _ = _load_fcst_analysis_data(
         fy, _mapping_mtime(), _bucket_mtime("FCST"), _bucket_mtime("DG&Quota"), _bucket_mtime("历史Union")
     )
@@ -1238,7 +1393,7 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
 
     st.subheader("Core MIX 分析")
     st.markdown(
-        "<small>Core MIX = Core 金额 ÷ (Core + Memoline) 金额；维度可交互选择，支持多维度下钻。</small>",
+        "<small>Core MIX = Core 金额 ÷ (Core + Memoline) 金额；选择纵向/横向维度，生成可交互棋盘格。</small>",
         unsafe_allow_html=True,
     )
 
@@ -1252,61 +1407,172 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     if cycle_scope.startswith("当前"):
         df = df[df["FCST Cycle"] == cur_cycle]
 
-    DIM_OPTIONS = ["服务大区", "服务战区", "产线名称", "产品大类", "SPL名称"]
-    dims = st.multiselect(
-        "分析维度（可多选，逐层下钻）",
-        DIM_OPTIONS,
-        default=["服务大区"],
-        key="core_mix_dims",
-    )
-    if not dims:
-        st.warning("请至少选择一个分析维度。")
-        return
+    DIM_LABELS = {
+        "服务大区": "大区",
+        "服务战区": "区域",
+        "纯产线大类": "纯产线大类",
+        "产线名称": "产线名称",
+        "产品大类": "产品大类",
+        "SPL名称": "SPL",
+    }
+    DIM_KEYS = list(DIM_LABELS.keys())
 
-    # 仅 Core/Memoline 有值（Core 或 Memoline）的行参与计算；空值不计入分子分母
+    c1, c2 = st.columns(2)
+    with c1:
+        vertical_dim = st.selectbox(
+            "纵向维度",
+            DIM_KEYS,
+            format_func=lambda x: DIM_LABELS[x],
+            index=0,
+            key="core_mix_vertical",
+        )
+    with c2:
+        horizontal_dim = st.selectbox(
+            "横向维度",
+            DIM_KEYS,
+            format_func=lambda x: DIM_LABELS[x],
+            index=2,
+            key="core_mix_horizontal",
+        )
+
+    # 仅 Core/Memoline 有值的行参与计算
     valid = df[df["Core/Memoline"].isin(["Core", "Memoline"])].copy()
     valid["_amt"] = pd.to_numeric(valid["业绩考核USDK"], errors="coerce").fillna(0)
     valid["_core"] = valid["_amt"].where(valid["Core/Memoline"] == "Core", 0.0)
     valid["_memo"] = valid["_amt"].where(valid["Core/Memoline"] == "Memoline", 0.0)
 
-    grp = valid.groupby(dims, dropna=False).agg(_core=("_core", "sum"), _memo=("_memo", "sum")).reset_index()
-    grp["Core金额"] = grp["_core"]
-    grp["Memoline金额"] = grp["_memo"]
-    denom = grp["_core"] + grp["_memo"]
-    grp["Core MIX%"] = (grp["_core"] / denom * 100).round(0)
-    grp["_label"] = grp[dims].astype(str).fillna("(空)").agg(" / ".join, axis=1)
-    grp = grp.sort_values("_core", ascending=False).reset_index(drop=True)
+    def _mix(core, memo):
+        s = core + memo
+        return (core / s * 100) if s > 0 else None
 
-    total_core = float(grp["_core"].sum())
-    total_memo = float(grp["_memo"].sum())
-    total_mix = (total_core / (total_core + total_memo) * 100) if (total_core + total_memo) else 0.0
+    total_core = float(valid["_core"].sum())
+    total_memo = float(valid["_memo"].sum())
+    total_mix = _mix(total_core, total_memo) or 0.0
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("总体 Core MIX", f"{total_mix:.0f}%")
-    c2.metric("Core 金额合计", f"{int(round(total_core)):,}")
-    c3.metric("Memoline 金额合计", f"{int(round(total_memo)):,}")
+    # 横向维度列（按自身 Core MIX 降序）
+    h_grp = valid.groupby(horizontal_dim, dropna=False).agg(_core=("_core", "sum"), _memo=("_memo", "sum")).reset_index()
+    h_grp["mix"] = h_grp.apply(lambda r: _mix(r["_core"], r["_memo"]), axis=1)
+    h_grp = h_grp[h_grp["_core"] + h_grp["_memo"] > 0].sort_values("mix", ascending=False, na_position="last").reset_index(drop=True)
 
-    if grp.empty:
-        st.info("该范围内无 Core/Memoline 数据。")
+    # 纵向维度行（按自身 Core MIX 降序）
+    v_grp = valid.groupby(vertical_dim, dropna=False).agg(_core=("_core", "sum"), _memo=("_memo", "sum")).reset_index()
+    v_grp["mix"] = v_grp.apply(lambda r: _mix(r["_core"], r["_memo"]), axis=1)
+    v_grp = v_grp[v_grp["_core"] + v_grp["_memo"] > 0].sort_values("mix", ascending=False, na_position="last").reset_index(drop=True)
+
+    # 计算每个纵向×横向交叉的 Core MIX
+    cross = valid.groupby([vertical_dim, horizontal_dim], dropna=False).agg(_core=("_core", "sum"), _memo=("_memo", "sum")).reset_index()
+    cross["mix"] = cross.apply(lambda r: _mix(r["_core"], r["_memo"]), axis=1)
+    cross_idx = cross.set_index([vertical_dim, horizontal_dim])["mix"].to_dict()
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("总体 Core MIX", f"{total_mix:.0f}%")
+    m2.metric("Core 金额合计", f"{int(round(total_core)):,}")
+    m3.metric("Memoline 金额合计", f"{int(round(total_memo)):,}")
+
+    if v_grp.empty or h_grp.empty:
+        st.info("所选维度下无有效 Core/Memoline 数据。")
         return
 
-    fig = px.bar(
-        grp, x="_label", y="Core MIX%",
-        labels={"_label": "维度", "Core MIX%": "Core MIX (%)"},
-        text=grp["Core MIX%"].astype(int).astype(str) + "%",
-        height=max(320, 40 * len(grp) + 120),
-    )
-    fig.add_hline(
-        y=total_mix, line_dash="dash", line_color="#d93025",
-        annotation_text=f"总体 {total_mix:.0f}%", annotation_position="top right",
-    )
-    fig.update_traces(marker_color="#1a73e8")
-    fig.update_layout(xaxis_tickangle=-30, margin=dict(l=20, r=20, t=30, b=80))
-    st.plotly_chart(fig, use_container_width=True)
+    def _mix_color(pct):
+        """Core MIX 颜色：0% 为很浅的绿，100% 为深绿；文字与背景保持对比。"""
+        if pct is None or pd.isna(pct):
+            return ("#f5f5f5", "#999999")
+        p = max(0.0, min(100.0, float(pct)))
+        # 从 #e6f5e6 插值到 #1a6b1a
+        t = p / 100.0
+        r = int(230 - t * (230 - 26))
+        g = int(245 - t * (245 - 107))
+        b = int(230 - t * (230 - 26))
+        bg = f"#{r:02x}{g:02x}{b:02x}"
+        fg = "#ffffff" if p > 55 else "#1a1a1a"
+        return (bg, fg)
 
-    show_cols = ["_label", "Core金额", "Memoline金额", "Core MIX%"]
-    tbl = grp[show_cols].rename(columns={"_label": "维度"})
-    st.dataframe(tbl, use_container_width=True, hide_index=True)
+    def _fmt_pct(pct):
+        return "—" if pct is None or pd.isna(pct) else f"{int(round(pct))}%"
+
+    # 汇总行（底部）：汇总列=总体，横向列=各横向维度自身 mix
+    summary_cells = ["<td class=\"dim-label\"><b>汇总</b></td>"]
+    bg, fg = _mix_color(total_mix)
+    summary_cells.append(f'<td class="mix-cell" style="background:{bg};color:{fg}"><b>{_fmt_pct(total_mix)}</b></td>')
+    for _, h in h_grp.iterrows():
+        bg, fg = _mix_color(h["mix"])
+        summary_cells.append(f'<td class="mix-cell" style="background:{bg};color:{fg}"><b>{_fmt_pct(h["mix"])}</b></td>')
+
+    row_html_list = []
+    # 绿色虚线分隔位置：最后一个 mix > total_mix 的纵向维度之后
+    cutoff = -1
+    for i, row in v_grp.iterrows():
+        if (row["mix"] or 0) > total_mix:
+            cutoff = i
+
+    n_cols = len(h_grp) + 2
+    for i, row in v_grp.iterrows():
+        v_val = row[vertical_dim]
+        cells = [f'<td class="dim-label">{_esc_html(str(v_val))}</td>']
+        # 汇总列 = 纵向维度自身 mix
+        bg, fg = _mix_color(row["mix"])
+        cells.append(f'<td class="mix-cell" style="background:{bg};color:{fg}">{_fmt_pct(row["mix"])}</td>')
+        for _, h in h_grp.iterrows():
+            h_val = h[horizontal_dim]
+            mix = cross_idx.get((v_val, h_val), None)
+            bg, fg = _mix_color(mix)
+            cells.append(f'<td class="mix-cell" style="background:{bg};color:{fg}">{_fmt_pct(mix)}</td>')
+        row_html_list.append("<tr>" + "".join(cells) + "</tr>")
+        if i == cutoff:
+            row_html_list.append(
+                f'<tr class="sep-row"><td colspan="{n_cols}"></td></tr>'
+            )
+
+    # 表头
+    h_header_cells = [f'<th class="dim-label">{DIM_LABELS[vertical_dim]}</th>', '<th class="mix-header">汇总<br>Core MIX</th>']
+    for _, h in h_grp.iterrows():
+        h_val = h[horizontal_dim]
+        mix = h["mix"]
+        h_header_cells.append(f'<th class="mix-header">{_esc_html(str(h_val))}<br><span class="h-mix">{_fmt_pct(mix)}</span></th>')
+
+    css = """
+    <style>
+    .core-mix-wrap { overflow-x: auto; }
+    .core-mix-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-family: "Source Sans Pro", sans-serif; font-size: 12px; color: #31333F; }
+    .core-mix-table * { box-sizing: border-box; }
+    .core-mix-table th, .core-mix-table td { padding: 6px 8px; border-bottom: 1px solid #e0e0e0; border-right: 1px solid #e0e0e0; vertical-align: middle; text-align: center; }
+    .core-mix-table th:last-child, .core-mix-table td:last-child { border-right: none; }
+    .core-mix-table th { position: sticky; top: 0; background: #f7f7f8; font-weight: 600; }
+    .core-mix-table td.dim-label { text-align: left; width: 160px; min-width: 160px; background: #fafafa; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .core-mix-table th.dim-label { text-align: left; width: 160px; min-width: 160px; }
+    .core-mix-table th.mix-header, .core-mix-table td.mix-cell { width: 100px; min-width: 80px; }
+    .core-mix-table td.mix-cell { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .core-mix-table .h-mix { font-size: 11px; color: #666; font-weight: 400; }
+    .core-mix-table tr:hover td.mix-cell { filter: brightness(0.95); }
+    .core-mix-table tr.sep-row td { border-top: 2px dashed #0f9d00; padding: 0; height: 0; background: transparent; }
+    /* 深色模式（显式 class：Streamlit 应用内切黑色主题时也能生效，不依赖 OS prefers-color-scheme） */
+    .theme-dark .core-mix-table { color: #f5f5f5; background: #0e1117; }
+    .theme-dark .core-mix-table th { background: #262730; color: #f5f5f5; border-bottom-color: #48484f; border-right-color: #48484f; }
+    .theme-dark .core-mix-table td { border-bottom-color: #36363f; border-right-color: #36363f; }
+    .theme-dark .core-mix-table td.dim-label { background: #1b1d26; color: #f5f5f5; font-weight: 600; }
+    .theme-dark .core-mix-table th.dim-label { background: #262730; color: #f5f5f5; }
+    .theme-dark .core-mix-table .h-mix { color: #d0d0d0; }
+    @media (prefers-color-scheme: dark) {
+      .core-mix-table { color: #f5f5f5; background: #0e1117; }
+      .core-mix-table th { background: #262730; color: #f5f5f5; border-bottom-color: #48484f; border-right-color: #48484f; }
+      .core-mix-table td { border-bottom-color: #36363f; border-right-color: #36363f; }
+      .core-mix-table td.dim-label { background: #1b1d26; color: #f5f5f5; font-weight: 600; }
+      .core-mix-table .h-mix { color: #d0d0d0; }
+    }
+    </style>
+    """
+
+    html = (
+        css
+        + '<div class="core-mix-wrap ' + _theme_cls() + '"><table class="core-mix-table"><thead><tr>'
+        + "".join(h_header_cells)
+        + "</tr></thead><tbody>"
+        + "<tr>" + "".join(summary_cells) + "</tr>"
+        + "".join(row_html_list)
+        + "</tbody></table></div>"
+    )
+
+    components.html(html, height=120 + (len(v_grp) + 2) * 38, scrolling=True)
 
 
 def _auto_refresh_on_data_change():
