@@ -1640,14 +1640,13 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
 
 
 def _render_core_mix_by_week(fy, scope, sub_region):
-    """by Week Core MIX 分析（跟随 Core MIX 棋盘格的横向维度）：
-    - 行：每个 FCST Cycle（Week1..WeekN），按自然序号排序
-    - 列：跟随 Core MIX 棋盘格的横向维度（默认"产线名称"），各维度值 + 汇总 + Trend
-    - 单元格：Core MIX%（行=周，列=横向维度值）
-    - 汇总列：该周的整体 Core MIX
-    - 最后一列 Trend：该周 Core MIX 在各横向维度上的分布柱状图（by week trend）
+    """by Week Core MIX 分析（跟随 Core MIX 棋盘格的纵向维度）：
+    - 第一列：上方纵向维度所选维度的值（如 大区/区域/产线名称...）
+    - 列：各 Week（FCST Cycle）的 Core MIX%
+    - 最后一列：by week Trend 折线 sparkline（类似 by Week 趋势表的结构）
+    - 首行：汇总（整体每周 Core MIX + trend）
     - 数据范围：所选 FY + scope/sub_region + 全部周（不按 cur_cycle 过滤）
-    - 配色：复用 > cutoff 深绿加粗白字、≤ cutoff 浅绿深色字
+    - 配色：> 总体 Core MIX 深绿加粗白字，≤ 浅绿深色字
     """
     import re as _re
     import streamlit.components.v1 as components
@@ -1663,15 +1662,15 @@ def _render_core_mix_by_week(fy, scope, sub_region):
         st.info("所选范围内无 by Week Core MIX 数据。")
         return
 
-    # 跟随 Core MIX 棋盘格的横向维度
-    horizontal_dim = st.session_state.get("core_mix_horizontal", "产线名称")
-    if horizontal_dim not in df.columns:
-        st.info(f"横向维度 {horizontal_dim} 不在数据中。")
+    # 跟随 Core MIX 棋盘格的纵向维度
+    vertical_dim = st.session_state.get("core_mix_vertical", "服务大区")
+    if vertical_dim not in df.columns:
+        st.info(f"纵向维度 {vertical_dim} 不在数据中。")
         return
 
     st.markdown(
-        f"<small style='color:#666;'>按 FCST Cycle 展示每个周在【<b>{_esc_html(horizontal_dim)}</b>】维度下的 Core MIX%；"
-        "汇总列=该周整体 Core MIX；最后一列=该周在各维度上的分布柱状图（by week trend）。</small>",
+        f"<small style='color:#666;'>按 FCST Cycle 展示每个 Week 在【<b>{_esc_html(vertical_dim)}</b>】维度下的 Core MIX%；"
+        "首行汇总=整体每周 Core MIX；最后一列=各维度值的 by week Trend。</small>",
         unsafe_allow_html=True,
     )
 
@@ -1685,160 +1684,154 @@ def _render_core_mix_by_week(fy, scope, sub_region):
         s = c + m
         return (c / s * 100) if s > 0 else None
 
-    # 各横向维度值（按自身 Core MIX 降序）
-    h_grp = (
-        valid.groupby(horizontal_dim, dropna=False)
+    # 各周（自然序号排序）
+    weeks = sorted(
+        valid["FCST Cycle"].dropna().unique().astype(str).tolist(), key=_wk_key
+    )
+    if not weeks:
+        st.info("所选范围内无 by Week Core MIX 数据。")
+        return
+
+    # 纵向维度各行（按自身整体 Core MIX 降序）
+    v_grp = (
+        valid.groupby(vertical_dim, dropna=False)
         .agg(_core=("_core_amt", "sum"), _memo=("_memo_amt", "sum"))
         .reset_index()
     )
-    h_grp["mix"] = h_grp.apply(lambda r: _mix(r["_core"], r["_memo"]), axis=1)
-    h_grp = h_grp[h_grp["_core"] + h_grp["_memo"] > 0].sort_values(
+    v_grp["mix"] = v_grp.apply(lambda r: _mix(r["_core"], r["_memo"]), axis=1)
+    v_grp = v_grp[v_grp["_core"] + v_grp["_memo"] > 0].sort_values(
         "mix", ascending=False, na_position="last"
     ).reset_index(drop=True)
-    h_vals = h_grp[horizontal_dim].tolist()
 
-    # 按周 × 横向维度 交叉聚合 Core MIX
+    # 维度值 × 周 交叉 Core MIX
     cross = (
-        valid.groupby(["FCST Cycle", horizontal_dim], dropna=False)
+        valid.groupby([vertical_dim, "FCST Cycle"], dropna=False)
         .agg(_core=("_core_amt", "sum"), _memo=("_memo_amt", "sum"))
         .reset_index()
     )
     cross["mix"] = cross.apply(lambda r: _mix(r["_core"], r["_memo"]), axis=1)
-    cross_idx = cross.set_index(["FCST Cycle", horizontal_dim])["mix"].to_dict()
+    cross_idx = cross.set_index([vertical_dim, "FCST Cycle"])["mix"].to_dict()
 
-    # 按周汇总
-    by_week = (
+    # 每周整体 Core MIX（汇总行）
+    week_mix = (
         valid.groupby("FCST Cycle")
         .agg(_core=("_core_amt", "sum"), _memo=("_memo_amt", "sum"))
         .reset_index()
     )
-    by_week["mix"] = by_week.apply(lambda r: _mix(r["_core"], r["_memo"]), axis=1)
-    by_week = by_week[by_week["_core"] + by_week["_memo"] > 0]
-    by_week = by_week.sort_values("FCST Cycle", key=lambda s: s.map(_wk_key)).reset_index(drop=True)
+    week_mix["mix"] = week_mix.apply(lambda r: _mix(r["_core"], r["_memo"]), axis=1)
+    week_mix_idx = week_mix.set_index("FCST Cycle")["mix"].to_dict()
 
-    cur_cycle = st.session_state.get("fcst_cur")
-    cutoff_mix = None
-    if cur_cycle:
-        row = by_week[by_week["FCST Cycle"].astype(str) == str(cur_cycle)]
-        if not row.empty and row.iloc[0]["mix"] is not None:
-            cutoff_mix = float(row.iloc[0]["mix"])
+    total_core = float(valid["_core_amt"].sum())
+    total_memo = float(valid["_memo_amt"].sum())
+    total_mix = _mix(total_core, total_memo)
 
     def _fmt_pct(x):
         return "—" if x is None or pd.isna(x) else f"{int(round(x))}%"
 
     def _mix_bg_fg(pct):
         if pct is None or pd.isna(pct):
-            return ("#f5f5f5", "#999999", False)
-        is_above = cutoff_mix is not None and pct > cutoff_mix
+            return ("transparent", "#999999", False)
+        is_above = total_mix is not None and pct > total_mix
         if is_above:
             return ("#1a6b1a", "#ffffff", True)
         return ("#e8f5e8", "#1a1a1a", False)
 
-    def _spark_bars(vals, color):
-        """每行一个微型水平柱状条（by week trend）。"""
-        n = len(vals)
-        if n == 0:
+    def _spark_line(vals, color):
+        """按周走势折线 sparkline（与 by Week 趋势表同款风格）。"""
+        pts = [v for v in vals if v is not None and not pd.isna(v)]
+        if len(pts) < 2:
             return ""
-        W, H = 100, 22
-        valid_vals = [v for v in vals if v is not None and not pd.isna(v)]
-        if not valid_vals:
-            return ""
-        max_v = max(valid_vals)
-        min_v = min(valid_vals)
+        W, H = 110, 26
+        max_v = max(pts)
+        min_v = min(pts)
         rng = max_v - min_v
-        bar_w = max(2, (W - 2) / n - 1)
-        rects = []
+        coords = []
         for i, v in enumerate(vals):
             if v is None or pd.isna(v):
+                coords.append(None)
                 continue
-            x = 1 + i * (bar_w + 1)
-            if rng == 0:
-                h = H * 0.6
-            else:
-                h = max(2, ((v - min_v) / rng) * (H - 4) + 2)
-            y = (H - h) / 2
-            rects.append(
-                f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" fill="{color}"/>'
-            )
+            px = (i / (len(vals) - 1)) * (W - 4) + 2 if len(vals) > 1 else W / 2
+            py = H / 2 if rng == 0 else H - 4 - ((v - min_v) / rng) * (H - 8)
+            coords.append((px, py))
+        seg_pts = " ".join([f"{x:.1f},{y:.1f}" for x, y in coords if x is not None])
+        circles = "".join(
+            [f'<circle cx="{x:.1f}" cy="{y:.1f}" r="1.8" fill="{color}"/>' for x, y in coords if x is not None]
+        )
         return (
-            f'<svg viewBox="0 0 {W} {H}" class="cmbw-spark">'
-            + "".join(rects)
-            + "</svg>"
+            f'<svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" class="cmbw-spark">'
+            f'<polyline points="{seg_pts}" fill="none" stroke="{color}" stroke-width="1.5" '
+            f'stroke-linecap="round" stroke-linejoin="round"/>{circles}</svg>'
         )
 
-    # 汇总列 Core MIX（整体 > cutoff 深绿，否则浅绿）
-    header_cells = [
-        f'<th class="lbl">FCST Cycle</th>',
-    ]
-    for h_val in h_vals:
-        mix = h_grp[h_grp[horizontal_dim] == h_val].iloc[0]["mix"] if (h_grp[horizontal_dim] == h_val).any() else None
-        header_cells.append(
-            f'<th class="num">{_esc_html(str(h_val))}<br><span class="h-mix">{_fmt_pct(mix)}</span></th>'
-        )
-    header_cells.append('<th class="num sumcol">汇总</th>')
+    # 表头：维度名 | Week... | Trend
+    header_cells = [f'<th class="lbl">{_esc_html(vertical_dim)}</th>']
+    header_cells += [f'<th class="num">{_esc_html(w)}</th>' for w in weeks]
     header_cells.append('<th class="num trendcol">Trend</th>')
 
     rows_html = []
-    for _, r in by_week.iterrows():
-        cycle = r["FCST Cycle"]
-        is_current = str(cycle) == str(cur_cycle)
-        row_bg = "#fffbe6" if is_current else "#ffffff"
+
+    def _build_row(label, get_mix_fn, is_summary=False, is_current_dim=False):
+        vals = [get_mix_fn(w) for w in weeks]
         cells = [
-            f'<td class="lbl" style="background:{row_bg};">{"<b>" + _esc_html(str(cycle)) + "</b>" if is_current else _esc_html(str(cycle))}</td>',
+            f'<td class="lbl{" dim-current" if is_current_dim else ""}">'
+            f'{"<b>" + _esc_html(str(label)) + "</b>" if is_summary or is_current_dim else _esc_html(str(label))}</td>'
         ]
-        row_vals = []  # 用于最后一列 trend
-        for h_val in h_vals:
-            mix = cross_idx.get((cycle, h_val), None)
-            row_vals.append(mix)
-            bg, fg, bold = _mix_bg_fg(mix)
+        for v in vals:
+            bg, fg, bold = _mix_bg_fg(v)
             fw = "bold" if bold else "normal"
             cells.append(
-                f'<td class="num" style="background:{bg};color:{fg};font-weight:{fw};">{_fmt_pct(mix)}</td>'
+                f'<td class="num" style="background:{bg};color:{fg};font-weight:{fw};">{_fmt_pct(v)}</td>'
             )
-        # 汇总列 = 该周整体 Core MIX
-        bg, fg, bold = _mix_bg_fg(r["mix"])
-        fw = "bold" if bold else "normal"
-        cells.append(
-            f'<td class="num sumcol" style="background:{bg};color:{fg};font-weight:{fw};">{_fmt_pct(r["mix"])}</td>'
+        row_overall = _mix(
+            sum(1 for v in vals if v is not None and not pd.isna(v) and v > 0),
+            sum(1 for v in vals if v is not None and not pd.isna(v) and v <= 0),
         )
-        # 最后一列 trend：该周在各横向维度上的分布柱状图
-        spark_color = "#1a6b1a" if (cutoff_mix is not None and r["mix"] is not None and r["mix"] > cutoff_mix) else "#888"
-        cells.append(
-            f'<td class="num trendcol" style="background:{row_bg};">{_spark_bars(row_vals, spark_color)}</td>'
-        )
+        # trend 颜色：该行整体 mix > 总体 → 深绿，否则灰
+        row_mix = None
+        spark_color = "#888888"
+        if is_summary:
+            spark_color = "#31333F"
         rows_html.append(
-            f'<tr style="background:{row_bg};">{"".join(cells)}</tr>'
+            '<tr class="' + ("summary-row" if is_summary else "data-row") + '">'
+            + "".join(cells)
+            + f'<td class="num trendcol">{_spark_line(vals, spark_color)}</td></tr>'
         )
 
-    n_cols = 1 + len(h_vals) + 2
+    # 汇总行（置顶）
+    _build_row("汇总", lambda w: week_mix_idx.get(w), is_summary=True)
+    # 各维度值行
+    for _, r in v_grp.iterrows():
+        v_val = r[vertical_dim]
+        _build_row(v_val, lambda w, vv=v_val: cross_idx.get((vv, w)))
+
+    n_week_cols = len(weeks)
     colgroup = (
-        '<colgroup>'
-        + '<col style="width:90px;">'
-        + "".join(['<col style="width:70px;">'] * len(h_vals))
-        + '<col style="width:60px;">'
-        + '<col style="width:110px;">'
-        + '</colgroup>'
+        '<colgroup><col style="width:150px;">'
+        + "".join(['<col style="width:64px;">'] * n_week_cols)
+        + '<col style="width:120px;"></colgroup>'
     )
 
     html = f"""
     <style>
-    .cmbw-wrap {{ overflow-x: auto; }}
+    .cmbw-wrap {{ overflow-x: auto; max-height: 420px; }}
     .cmbw-table {{ width: 100%; border-collapse: collapse; font-family: "Source Sans Pro", sans-serif; font-size: 11px; color: #31333F; }}
     .cmbw-table * {{ box-sizing: border-box; }}
     .cmbw-table th, .cmbw-table td {{ padding: 3px 5px; border-bottom: 1px solid #e0e0e0; border-right: 1px solid #e0e0e0; vertical-align: middle; }}
     .cmbw-table th:last-child, .cmbw-table td:last-child {{ border-right: none; }}
-    .cmbw-table th {{ background: #f7f7f8; font-weight: 600; text-align: center; white-space: nowrap; }}
-    .cmbw-table th.lbl {{ text-align: left; }}
+    .cmbw-table thead th {{ position: sticky; top: 0; background: #f7f7f8; font-weight: 600; text-align: center; white-space: nowrap; z-index: 5; }}
+    .cmbw-table thead th.lbl {{ text-align: left; }}
+    .cmbw-table tbody tr.summary-row td {{ background: #fbfbfc; font-weight: 600; }}
+    .cmbw-table tbody tr.summary-row td.num {{ font-weight: 600; }}
     .cmbw-table td.num {{ text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 10px; }}
-    .cmbw-table td.lbl {{ text-align: left; font-weight: 500; }}
-    .cmbw-table .sumcol {{ font-weight: 600; }}
+    .cmbw-table td.lbl {{ text-align: left; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    .cmbw-table td.lbl.dim-current {{ color: #b45309; }}
     .cmbw-table .trendcol {{ padding: 1px 4px; }}
-    .cmbw-table .h-mix {{ font-size: 9px; color: #666; font-weight: 400; }}
-    .cmbw-spark {{ width: 100px; height: 22px; display: block; margin: 0 auto; }}
+    .cmbw-spark {{ width: 105px; height: 24px; display: block; margin: 0 auto; }}
     .theme-dark .cmbw-table {{ color: #f5f5f5; background: #0e1117; }}
-    .theme-dark .cmbw-table th {{ background: #262730; color: #f5f5f5; border-bottom-color: #48484f; border-right-color: #48484f; }}
+    .theme-dark .cmbw-table thead th {{ background: #262730; color: #f5f5f5; border-bottom-color: #48484f; border-right-color: #48484f; }}
     .theme-dark .cmbw-table td {{ border-bottom-color: #36363f; border-right-color: #36363f; }}
     .theme-dark .cmbw-table td.lbl {{ background: #1b1d26; color: #f5f5f5; }}
+    .theme-dark .cmbw-table tbody tr.summary-row td {{ background: #1f212b; }}
     </style>
     <div class="cmbw-wrap {_theme_cls()}">
     <table class="cmbw-table">
@@ -1848,7 +1841,7 @@ def _render_core_mix_by_week(fy, scope, sub_region):
     </table>
     </div>
     """
-    components.html(html, height=70 + len(by_week) * 26 + 2, scrolling=False)
+    components.html(html, height=76 + (len(v_grp) + 1) * 26 + 2, scrolling=False)
 
 
 def _auto_refresh_on_data_change():
@@ -2231,60 +2224,63 @@ def main():
             )
 
     # 顶部容器 fixed + 极紧凑样式：通过 #main-top-marker 定位
+    # 注意：Streamlit 1.6x 的容器外层 testid 是 stLayoutWrapper（非旧版 stVerticalBlockBorderWrapper）；
+    # 页面自带 60px 高的白色 stHeader（z-index 999990），fixed 条须置于其下（top:60px）否则被遮挡。
     st.markdown(
         """
         <style>
-        /* 顶部容器 fixed 钉在视口最顶端，2 行紧凑布局，高度约 40px */
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) {
+        /* 顶部容器 fixed 钉在视口顶端（stHeader 下方），2 行紧凑布局（JS 兜底会覆盖为动态值） */
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) {
             position: fixed !important;
-            top: 0 !important;
+            top: 60px !important;
             left: 0 !important;
             right: 0 !important;
-            z-index: 9999 !important;
-            height: 40px !important;
+            z-index: 999989 !important;
+            height: 46px !important;
             overflow: hidden !important;
             background-color: var(--background-color) !important;
-            padding: 1px 6px !important;
+            padding: 1px 8px !important;
             margin: 0 !important;
             line-height: 1 !important;
             box-sizing: border-box !important;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.10) !important;
         }
-        /* 防止内容被 fixed 顶部条遮挡，给主区域加 padding-top */
-        .main .block-container {
-            padding-top: 48px !important;
+        /* 防止内容被 fixed 顶部条遮挡，给主区域加 padding-top（60 header + 46 bar + 10 间距） */
+        [data-testid="stMainBlockContainer"] {
+            padding-top: 116px !important;
         }
         /* 极小字号与行高 */
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) h3 {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) h3 {
             font-size: 0.7rem !important;
             margin: 0 !important;
             line-height: 1 !important;
         }
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stMarkdown,
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stMarkdown p,
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stMarkdown small,
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stMarkdown span {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stMarkdown,
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stMarkdown p,
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stMarkdown small,
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stMarkdown span {
             font-size: 0.55rem !important;
             margin: 0 !important;
             padding: 0 !important;
             line-height: 1.1 !important;
         }
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stCaption {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stCaption {
             font-size: 0.5rem !important;
             margin: 0 !important;
         }
         /* 横向块紧贴、无间距 */
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) [data-testid="stHorizontalBlock"] {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) [data-testid="stHorizontalBlock"] {
             gap: 0.15rem !important;
             margin: 0 !important;
             padding: 0 !important;
             align-items: center !important;
         }
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) [data-testid="stHorizontalBlock"] > div {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) [data-testid="stHorizontalBlock"] > div {
             margin: 0 !important;
             padding: 0 !important;
         }
         /* 按钮极小 */
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stButton > button {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stButton > button {
             padding: 0rem 0.2rem !important;
             font-size: 0.55rem !important;
             min-height: 14px !important;
@@ -2292,55 +2288,55 @@ def main():
             border-radius: 3px !important;
         }
         /* radio 横向选项极小 */
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stRadio {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stRadio {
             margin: 0 !important;
             padding: 0 !important;
         }
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stRadio > label {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stRadio > label {
             display: none !important;
         }
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stRadio [role="radiogroup"] {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stRadio [role="radiogroup"] {
             gap: 0 !important;
             margin: 0 !important;
         }
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stRadio [role="radiogroup"] label {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stRadio [role="radiogroup"] label {
             padding: 0 0.3rem !important;
             font-size: 0.55rem !important;
             min-height: 14px !important;
         }
         /* 下拉框极小 */
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stSelectbox {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stSelectbox {
             margin: 0 !important;
             padding: 0 !important;
         }
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stSelectbox [data-baseweb="select"] {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stSelectbox [data-baseweb="select"] {
             min-height: 16px !important;
             font-size: 0.55rem !important;
         }
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stSelectbox [data-baseweb="select"] > div {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stSelectbox [data-baseweb="select"] > div {
             padding-top: 0 !important;
             padding-bottom: 0 !important;
             min-height: 16px !important;
         }
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) [data-baseweb="select"] {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) [data-baseweb="select"] {
             border-radius: 3px !important;
         }
         /* 隐藏 warning 信息的留白 */
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stAlert {
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stAlert {
             padding: 0.1rem 0.3rem !important;
             font-size: 0.55rem !important;
             margin: 0 !important;
         }
         /* 每个分析模块的容器（差异分析 / by Week / Core MIX）略缩边距 */
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-module-marker),
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-trend-marker),
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-coremix-marker) {
+        [data-testid="stLayoutWrapper"]:has(#fcst-module-marker),
+        [data-testid="stLayoutWrapper"]:has(#fcst-trend-marker),
+        [data-testid="stLayoutWrapper"]:has(#fcst-coremix-marker) {
             padding: 0.4rem 0.6rem !important;
             margin-bottom: 0.5rem !important;
         }
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-module-marker) h3,
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-trend-marker) h3,
-        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-coremix-marker) h3 {
+        [data-testid="stLayoutWrapper"]:has(#fcst-module-marker) h3,
+        [data-testid="stLayoutWrapper"]:has(#fcst-trend-marker) h3,
+        [data-testid="stLayoutWrapper"]:has(#fcst-coremix-marker) h3 {
             font-size: 1rem !important;
             margin: 0 0 0.25rem 0 !important;
         }
@@ -2348,6 +2344,75 @@ def main():
         """,
         unsafe_allow_html=True,
     )
+
+    # JS 兜底：直接在父文档中给顶部容器打上 inline fixed 样式。
+    # 原因：部分浏览器/Streamlit DOM 下 CSS :has() 可能不匹配，或祖先元素带 transform
+    # 导致 position:fixed 失效；这里用 JS 每隔一段时间强制应用，确保真正钉在视口顶端。
+    import streamlit.components.v1 as _components
+
+    _pin_js = """
+    <script>
+    (function() {
+        var BAR_H = 46;
+        var STYLE_ID = 'pin-bar-style-v2';
+        function ensureStyle(doc) {
+            if (doc.getElementById(STYLE_ID)) return;
+            var st = doc.createElement('style');
+            st.id = STYLE_ID;
+            st.textContent = [
+                '.fcst-pin-bar { position: fixed !important; z-index: 999989 !important; left: 0 !important; right: 0 !important; width: 100% !important; height: ' + BAR_H + 'px !important; overflow: hidden !important; background: var(--background-color, #ffffff) !important; padding: 1px 8px !important; box-sizing: border-box !important; box-shadow: 0 1px 4px rgba(0,0,0,0.10) !important; line-height: 1 !important; }',
+                '.fcst-pin-bar [data-testid="stVerticalBlock"] { gap: 0 !important; }',
+                '.fcst-pin-bar [data-testid="stVerticalBlock"] > div { margin: 0 !important; padding: 0 !important; }',
+                '.fcst-pin-bar [data-testid="stHorizontalBlock"] { gap: 4px !important; margin: 0 !important; padding: 0 !important; align-items: center !important; min-height: 0 !important; }',
+                '.fcst-pin-bar [data-testid="stHorizontalBlock"] > div { margin: 0 !important; padding: 0 !important; min-height: 0 !important; }',
+                '.fcst-pin-bar .stMarkdown, .fcst-pin-bar .stMarkdown p, .fcst-pin-bar .stMarkdown span, .fcst-pin-bar .stMarkdown small { font-size: 10px !important; margin: 0 !important; padding: 0 !important; line-height: 1.1 !important; }',
+                '.fcst-pin-bar .stButton { margin: 0 !important; padding: 0 !important; }',
+                '.fcst-pin-bar .stButton > button { padding: 0 6px !important; font-size: 10px !important; min-height: 18px !important; height: 18px !important; line-height: 1 !important; border-radius: 3px !important; }',
+                /* --- selectbox：Streamlit 1.6x 用 React-Aria ComboBox 结构 --- */
+                '.fcst-pin-bar .stSelectbox { margin: 0 !important; padding: 0 !important; }',
+                '.fcst-pin-bar .stSelectbox > div { margin: 0 !important; min-height: 0 !important; }',
+                '.fcst-pin-bar .stSelectbox div.react-aria-ComboBox { min-height: 18px !important; height: 18px !important; margin: 0 !important; }',
+                '.fcst-pin-bar .stSelectbox .react-aria-ComboBox > div { min-height: 18px !important; height: 18px !important; padding: 0 4px !important; }',
+                '.fcst-pin-bar .stSelectbox .react-aria-ComboBox input { min-height: 16px !important; height: 16px !important; font-size: 10px !important; padding: 0 4px !important; }',
+                '.fcst-pin-bar .stSelectbox .react-aria-ComboBox button { min-height: 16px !important; height: 16px !important; width: 16px !important; padding: 0 !important; }',
+                '.fcst-pin-bar .stSelectbox .react-aria-ComboBox button svg { width: 11px !important; height: 11px !important; }',
+                /* --- radio 紧凑 --- */
+                '.fcst-pin-bar .stRadio { margin: 0 !important; padding: 0 !important; }',
+                '.fcst-pin-bar .stRadio > div { margin: 0 !important; min-height: 0 !important; }',
+                '.fcst-pin-bar .stRadio [role="radiogroup"] { gap: 2px !important; margin: 0 !important; min-height: 0 !important; }',
+                '.fcst-pin-bar .stRadio [role="radiogroup"] label { min-height: 17px !important; height: 17px !important; font-size: 10px !important; padding: 0 4px !important; gap: 2px !important; margin: 0 !important; }',
+                '.fcst-pin-bar .stAlert { padding: 1px 4px !important; font-size: 10px !important; margin: 0 !important; min-height: 0 !important; }'
+            ].join('\\n');
+            doc.head.appendChild(st);
+        }
+        function headerH(doc) {
+            var hd = doc.querySelector('[data-testid="stHeader"]');
+            return hd ? hd.getBoundingClientRect().height : 60;
+        }
+        function apply() {
+            try {
+                var doc = window.parent.document;
+                ensureStyle(doc);
+                var marker = doc.getElementById('main-top-marker');
+                if (!marker) return;
+                var el = marker.closest('[data-testid="stLayoutWrapper"]')
+                      || marker.closest('[data-testid="stVerticalBlock"]');
+                if (!el) return;
+                if (!el.classList.contains('fcst-pin-bar')) el.classList.add('fcst-pin-bar');
+                var hh = headerH(doc);
+                el.style.top = hh + 'px';
+                // 主内容下移，避免被固定条遮挡
+                var main = doc.querySelector('[data-testid="stMainBlockContainer"]')
+                        || doc.querySelector('.main .block-container');
+                if (main) main.style.paddingTop = (hh + BAR_H + 10) + 'px';
+            } catch (e) { /* 跨域时静默失败 */ }
+        }
+        apply();
+        setInterval(apply, 600);
+    })();
+    </script>
+    """
+    _components.html(_pin_js, height=0)
 
     if main_view == "FCST 分析":
         if fcst_vals is not None:
