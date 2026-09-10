@@ -1397,16 +1397,6 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
         unsafe_allow_html=True,
     )
 
-    cycle_scope = st.radio(
-        "数据范围",
-        [f"当前 Cycle（{cur_cycle}）", "全部周合计"],
-        horizontal=True,
-        key="core_mix_cycle_scope",
-        index=0,
-    )
-    if cycle_scope.startswith("当前"):
-        df = df[df["FCST Cycle"] == cur_cycle]
-
     DIM_LABELS = {
         "服务大区": "大区",
         "服务战区": "区域",
@@ -1417,23 +1407,34 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     }
     DIM_KEYS = list(DIM_LABELS.keys())
 
+    # 读取当前选择；若两边相同则自动切换，避免 groupby 重复列报错
+    v_default = st.session_state.get("core_mix_vertical", "服务大区")
+    h_default = st.session_state.get("core_mix_horizontal", "产线名称")
+    if h_default == v_default:
+        h_default = next((k for k in DIM_KEYS if k != v_default), "产线名称")
+
     c1, c2 = st.columns(2)
     with c1:
+        v_options = [k for k in DIM_KEYS if k != h_default]
         vertical_dim = st.selectbox(
             "纵向维度",
-            DIM_KEYS,
+            v_options,
             format_func=lambda x: DIM_LABELS[x],
-            index=0,
+            index=v_options.index(v_default) if v_default in v_options else 0,
             key="core_mix_vertical",
         )
     with c2:
+        h_options = [k for k in DIM_KEYS if k != vertical_dim]
         horizontal_dim = st.selectbox(
             "横向维度",
-            DIM_KEYS,
+            h_options,
             format_func=lambda x: DIM_LABELS[x],
-            index=2,
+            index=h_options.index(h_default) if h_default in h_options else 0,
             key="core_mix_horizontal",
         )
+
+    # 数据范围：跟随页面顶部当前 Cycle（不再单独放 radio）
+    df = df[df["FCST Cycle"] == cur_cycle]
 
     # 仅 Core/Memoline 有值的行参与计算
     valid = df[df["Core/Memoline"].isin(["Core", "Memoline"])].copy()
@@ -1490,10 +1491,10 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     def _fmt_pct(pct):
         return "—" if pct is None or pd.isna(pct) else f"{int(round(pct))}%"
 
-    # 汇总行（底部）：汇总列=总体，横向列=各横向维度自身 mix
+    # 汇总行（置顶）：汇总列=总体，横向列=各横向维度自身 mix
     summary_cells = ["<td class=\"dim-label\"><b>汇总</b></td>"]
     bg, fg = _mix_color(total_mix)
-    summary_cells.append(f'<td class="mix-cell" style="background:{bg};color:{fg}"><b>{_fmt_pct(total_mix)}</b></td>')
+    summary_cells.append(f'<td class="mix-cell mix-summary" style="background:{bg};color:{fg}"><b>{_fmt_pct(total_mix)}</b></td>')
     for _, h in h_grp.iterrows():
         bg, fg = _mix_color(h["mix"])
         summary_cells.append(f'<td class="mix-cell" style="background:{bg};color:{fg}"><b>{_fmt_pct(h["mix"])}</b></td>')
@@ -1511,7 +1512,7 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
         cells = [f'<td class="dim-label">{_esc_html(str(v_val))}</td>']
         # 汇总列 = 纵向维度自身 mix
         bg, fg = _mix_color(row["mix"])
-        cells.append(f'<td class="mix-cell" style="background:{bg};color:{fg}">{_fmt_pct(row["mix"])}</td>')
+        cells.append(f'<td class="mix-cell mix-summary" style="background:{bg};color:{fg}">{_fmt_pct(row["mix"])}</td>')
         for _, h in h_grp.iterrows():
             h_val = h[horizontal_dim]
             mix = cross_idx.get((v_val, h_val), None)
@@ -1524,7 +1525,7 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
             )
 
     # 表头
-    h_header_cells = [f'<th class="dim-label">{DIM_LABELS[vertical_dim]}</th>', '<th class="mix-header">汇总<br>Core MIX</th>']
+    h_header_cells = [f'<th class="dim-label">{DIM_LABELS[vertical_dim]}</th>', '<th class="mix-header mix-summary">汇总<br>Core MIX</th>']
     for _, h in h_grp.iterrows():
         h_val = h[horizontal_dim]
         mix = h["mix"]
@@ -1533,16 +1534,25 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     css = """
     <style>
     .core-mix-wrap { overflow-x: auto; }
-    .core-mix-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-family: "Source Sans Pro", sans-serif; font-size: 12px; color: #31333F; }
+    .core-mix-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-family: "Source Sans Pro", sans-serif; font-size: 11px; color: #31333F; }
     .core-mix-table * { box-sizing: border-box; }
-    .core-mix-table th, .core-mix-table td { padding: 6px 8px; border-bottom: 1px solid #e0e0e0; border-right: 1px solid #e0e0e0; vertical-align: middle; text-align: center; }
+    .core-mix-table th, .core-mix-table td { padding: 3px 5px; border-bottom: 1px solid #e0e0e0; border-right: 1px solid #e0e0e0; vertical-align: middle; text-align: center; }
     .core-mix-table th:last-child, .core-mix-table td:last-child { border-right: none; }
-    .core-mix-table th { position: sticky; top: 0; background: #f7f7f8; font-weight: 600; }
-    .core-mix-table td.dim-label { text-align: left; width: 160px; min-width: 160px; background: #fafafa; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .core-mix-table th.dim-label { text-align: left; width: 160px; min-width: 160px; }
-    .core-mix-table th.mix-header, .core-mix-table td.mix-cell { width: 100px; min-width: 80px; }
+    /* 表头吸顶 */
+    .core-mix-table thead th { position: sticky; top: 0; background: #f7f7f8; font-weight: 600; z-index: 30; }
+    .core-mix-table thead th.dim-label { z-index: 40; }
+    .core-mix-table thead th.mix-summary { z-index: 40; }
+    /* 汇总行吸顶（紧跟表头） */
+    .core-mix-table tbody tr.summary-row td { position: sticky; top: 40px; background: #ffffff; z-index: 25; }
+    .core-mix-table tbody tr.summary-row td.dim-label { background: #fafafa; z-index: 35; }
+    .core-mix-table tbody tr.summary-row td.mix-summary { background: #ffffff; z-index: 35; }
+    /* 首列（纵向维度）+ 第二列（汇总 Core MIX）左吸 */
+    .core-mix-table td.dim-label, .core-mix-table th.dim-label { text-align: left; width: 130px; min-width: 130px; background: #fafafa; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: sticky; left: 0; z-index: 20; }
+    .core-mix-table th.dim-label { background: #f7f7f8; }
+    .core-mix-table td.mix-summary, .core-mix-table th.mix-summary { width: 80px; min-width: 80px; position: sticky; left: 130px; z-index: 20; background: inherit; }
+    .core-mix-table th.mix-header:not(.mix-summary), .core-mix-table td.mix-cell:not(.mix-summary) { width: 80px; min-width: 80px; }
     .core-mix-table td.mix-cell { font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .core-mix-table .h-mix { font-size: 11px; color: #666; font-weight: 400; }
+    .core-mix-table .h-mix { font-size: 10px; color: #666; font-weight: 400; }
     .core-mix-table tr:hover td.mix-cell { filter: brightness(0.95); }
     .core-mix-table tr.sep-row td { border-top: 2px dashed #0f9d00; padding: 0; height: 0; background: transparent; }
     /* 深色模式（显式 class：Streamlit 应用内切黑色主题时也能生效，不依赖 OS prefers-color-scheme） */
@@ -1551,6 +1561,9 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     .theme-dark .core-mix-table td { border-bottom-color: #36363f; border-right-color: #36363f; }
     .theme-dark .core-mix-table td.dim-label { background: #1b1d26; color: #f5f5f5; font-weight: 600; }
     .theme-dark .core-mix-table th.dim-label { background: #262730; color: #f5f5f5; }
+    .theme-dark .core-mix-table td.mix-summary { background: #0e1117; color: #f5f5f5; }
+    .theme-dark .core-mix-table tbody tr.summary-row td { background: #0e1117; }
+    .theme-dark .core-mix-table tbody tr.summary-row td.dim-label { background: #1b1d26; }
     .theme-dark .core-mix-table .h-mix { color: #d0d0d0; }
     @media (prefers-color-scheme: dark) {
       .core-mix-table { color: #f5f5f5; background: #0e1117; }
@@ -1567,12 +1580,12 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
         + '<div class="core-mix-wrap ' + _theme_cls() + '"><table class="core-mix-table"><thead><tr>'
         + "".join(h_header_cells)
         + "</tr></thead><tbody>"
-        + "<tr>" + "".join(summary_cells) + "</tr>"
+        + '<tr class="summary-row">' + "".join(summary_cells) + "</tr>"
         + "".join(row_html_list)
         + "</tbody></table></div>"
     )
 
-    components.html(html, height=120 + (len(v_grp) + 2) * 38, scrolling=True)
+    components.html(html, height=90 + (len(v_grp) + 2) * 26, scrolling=True)
 
 
 def _auto_refresh_on_data_change():
