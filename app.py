@@ -1028,32 +1028,9 @@ def _render_kpi_dashboard(ttl):
 
 
 def _render_fcst_controls_inline():
-    """在吸顶容器内渲染 FCST 维度/范围控件（财年财季、当前/对比 Cycle、范围、战区、刷新）。
+    """在吸顶容器内渲染 FCST 维度/范围控件（财年、当前/对比 Cycle、范围、战区）。
     返回选中的 (fy, cur_cycle, cmp_cycle, scope, sub_region)；若数据池为空，返回 None。
-    紧凑布局：去描述文、数据版本与刷新按钮同行，控件极小字号。"""
-    # 顶部一行：数据版本 + 刷新按钮（极小）
-    _rf_c1, _rf_c2 = st.columns([6, 1])
-    with _rf_c1:
-        try:
-            _fcst_mt = _bucket_mtime("FCST")
-            if _fcst_mt:
-                _mt_str = datetime.fromtimestamp(_fcst_mt).strftime("%Y-%m-%d %H:%M:%S")
-                st.markdown(
-                    f"<span style='font-size:0.6rem;color:#888;'>FCST 数据版本：{_mt_str}</span>",
-                    unsafe_allow_html=True,
-                )
-        except Exception:  # noqa
-            pass
-    with _rf_c2:
-        if st.button(
-            "🔄 刷新",
-            key="fcst_refresh",
-            use_container_width=True,
-            help="左侧数据源变更后若右侧未自动刷新，点此强制刷新",
-        ):
-            _invalidate_fcst_cache()
-            st.rerun()
-
+    极紧凑单行布局：5 个 selectbox 横向排开，无标签。"""
     meta = load_bucket_columns("FCST", ["财年财季", "FCST Cycle", "服务大区", "服务战区"])
     if meta.empty:
         st.warning("FCST 数据池为空，请先在左侧上传 FCST 数据。")
@@ -1061,37 +1038,28 @@ def _render_fcst_controls_inline():
     fy_opts = sorted(meta["财年财季"].dropna().unique().tolist())
     cyc_opts = sorted(meta["FCST Cycle"].dropna().unique().tolist(), key=week_sort_key)
     region_opts = sorted(meta["服务大区"].dropna().unique().tolist())
+    all_scope = ["TTL"] + region_opts
 
-    # 三个核心筛选控件放在同一行
-    c1, c2, c3 = st.columns([3, 1, 1])
+    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 2, 2])
     with c1:
-        fy = _segmented_buttons("财年财季", fy_opts, key="fcst_fy", default=fy_opts[-1] if fy_opts else None)
+        fy = st.selectbox("财年", fy_opts, index=len(fy_opts) - 1, key="fcst_fy", label_visibility="collapsed")
     with c2:
-        st.markdown("<small>当前 FCST Cycle</small>", unsafe_allow_html=True)
-        cur_cycle = st.selectbox(
-            "当前 FCST Cycle", cyc_opts, index=len(cyc_opts) - 1,
-            key="fcst_cur", label_visibility="collapsed"
-        )
+        cur_cycle = st.selectbox("当前 Cycle", cyc_opts, index=len(cyc_opts) - 1, key="fcst_cur", label_visibility="collapsed")
     with c3:
-        st.markdown("<small>对比 FCST Cycle</small>", unsafe_allow_html=True)
-        cmp_cycle = st.selectbox(
-            "对比 FCST Cycle", cyc_opts, index=max(0, len(cyc_opts) - 2),
-            key="fcst_cmp", label_visibility="collapsed"
-        )
-
-    scope = _segmented_buttons("范围", ["TTL"] + region_opts, key="fcst_scope", default="TTL")
-
-    sub_region = None
-    if scope != "TTL":
-        sub_opts = sorted(meta[meta["服务大区"] == scope]["服务战区"].dropna().unique().tolist())
-        sub_sel = _segmented_buttons(
-            "战区（不选=该大区合计）",
-            ["（合计）"] + sub_opts,
-            key="fcst_sub",
-            default="（合计）",
-        )
-        if sub_sel != "（合计）":
-            sub_region = sub_sel
+        cmp_cycle = st.selectbox("对比 Cycle", cyc_opts, index=max(0, len(cyc_opts) - 2), key="fcst_cmp", label_visibility="collapsed")
+    with c4:
+        scope = st.selectbox("范围", all_scope, index=0, key="fcst_scope", label_visibility="collapsed")
+    with c5:
+        if scope != "TTL":
+            sub_opts = sorted(meta[meta["服务大区"] == scope]["服务战区"].dropna().unique().tolist())
+            sub_sel = st.selectbox("战区", ["（合计）"] + sub_opts, index=0, key="fcst_sub", label_visibility="collapsed")
+            sub_region = None if sub_sel == "（合计）" else sub_sel
+        else:
+            sub_region = None
+            st.markdown(
+                "<span style='font-size:0.5rem;color:#aaa;'>范围=TTL 时不选战区</span>",
+                unsafe_allow_html=True,
+            )
 
     return fy, cur_cycle, cmp_cycle, scope, sub_region
 
@@ -1131,10 +1099,17 @@ def _render_fcst_modules(fy, cur_cycle, cmp_cycle, scope, sub_region):
         st.markdown('<div id="fcst-trend-marker" style="display:none;"></div>', unsafe_allow_html=True)
         _render_fcst_trend(fy, scope, sub_region)
 
-    # 模块 3：Core MIX 分析
+    # 模块 3：Core MIX 分析（含棋盘格 + by Week Core MIX 子表）
     with st.container(border=True):
         st.markdown('<div id="fcst-coremix-marker" style="display:none;"></div>', unsafe_allow_html=True)
         _render_core_mix(fy, scope, sub_region, cur_cycle)
+        # by Week Core MIX：按 FCST Cycle 展示每个周 Core/Memoline 金额及 Core MIX
+        st.markdown(
+            "<div style='margin-top:0.5rem;padding-top:0.4rem;border-top:1px dashed #ccc;'>"
+            "<b style='font-size:0.85rem;'>by Week Core MIX</b></div>",
+            unsafe_allow_html=True,
+        )
+        _render_core_mix_by_week(fy, scope, sub_region)
 
 
 def _render_fcst_trend(fy, scope, sub_region):
@@ -1429,8 +1404,11 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     # 仅 APOS/POS 行参与 Core/Memoline 分类计算
     if "POS_APOS" in df.columns:
         df = df[df["POS_APOS"].isin(["APOS", "POS"])]
+    # 棋盘格只展示选中的当前 Cycle（顶部"当前 FCST Cycle"选哪个就显示哪个）
+    if "FCST Cycle" in df.columns and cur_cycle:
+        df = df[df["FCST Cycle"] == cur_cycle]
     if df.empty:
-        st.info("所选范围内无有效数据，无法计算 Core MIX。")
+        st.info("所选 Cycle/范围内无有效 Core/Memoline 数据。")
         return
 
     st.subheader("Core MIX 分析")
@@ -1648,6 +1626,139 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     )
 
     components.html(html, height=90 + (len(v_grp) + 2) * 26, scrolling=True)
+
+
+def _render_core_mix_by_week(fy, scope, sub_region):
+    """by Week Core MIX 分析：按 FCST Cycle（Week1..WeekN）展示每个周的
+    Core 金额、Memoline 金额、合计、Core MIX%。
+
+    - 数据范围：所选 FY + scope/sub_region 下【全部周 + FCST/ACT(历史Union)】
+    - 绿色虚线：Core MIX > 当前 Cycle 的 Core MIX 时标记为超过（参考阈值）
+    - 颜色：复用棋盘格的 > cutoff 深绿加粗、≤ cutoff 浅绿配色
+    """
+    import re as _re
+    import streamlit.components.v1 as components
+
+    fcst, _, _, _, _ = _load_fcst_analysis_data(
+        fy, _mapping_mtime(), _bucket_mtime("FCST"), _bucket_mtime("DG&Quota"), _bucket_mtime("历史Union")
+    )
+    parts = [fcst]
+    try:
+        hist = load_bucket("历史Union")
+        if not hist.empty:
+            for col in ("财年财季", "服务大区", "POS_APOS", "物料通路", "业绩考核USDK", "FCST Cycle"):
+                if col not in hist.columns:
+                    hist[col] = None
+            parts.append(hist)
+    except Exception:
+        pass
+    df = pd.concat(parts, ignore_index=True, sort=False)
+    df = add_core_memoline(df)
+    if "财年财季" in df.columns and fy:
+        df = df[df["财年财季"] == fy]
+    if scope != "TTL" and "服务大区" in df.columns:
+        df = df[df["服务大区"] == scope]
+    if sub_region and "服务战区" in df.columns:
+        df = df[df["服务战区"] == sub_region]
+    if "POS_APOS" in df.columns:
+        df = df[df["POS_APOS"].isin(["APOS", "POS"])]
+    if df.empty or "FCST Cycle" not in df.columns:
+        st.info("所选范围内无 by Week Core MIX 数据。")
+        return
+
+    st.markdown(
+        "<small style='color:#666;'>按 FCST Cycle 展示每个周的 Core / Memoline 金额及 Core MIX%；"
+        "绿色虚线标示超过所选当前 Cycle 的 Core MIX。</small>",
+        unsafe_allow_html=True,
+    )
+
+    valid = df[df["Core/Memoline"].isin(["Core", "Memoline"])].copy()
+    valid["_amt"] = pd.to_numeric(valid["业绩考核USDK"], errors="coerce").fillna(0)
+    valid["_core"] = valid["_amt"].where(valid["Core/Memoline"] == "Core", 0.0)
+    valid["_memo"] = valid["_amt"].where(valid["Core/Memoline"] == "Memoline", 0.0)
+
+    def _wk_key(w):
+        nums = _re.findall(r"\d+", str(w))
+        return int(nums[0]) if nums else 0
+
+    by_week = (
+        valid.groupby("FCST Cycle")
+        .agg(_core=("_core", "sum"), _memo=("_memo", "sum"))
+        .reset_index()
+    )
+    by_week["total"] = by_week["_core"] + by_week["_memo"]
+    by_week["mix"] = by_week.apply(
+        lambda r: (r["_core"] / r["total"] * 100) if r["total"] > 0 else None, axis=1
+    )
+    by_week = by_week[by_week["total"] > 0]
+    by_week = by_week.sort_values("FCST Cycle", key=lambda s: s.map(_wk_key)).reset_index(drop=True)
+
+    # 参考阈值：当前 Cycle 的 Core MIX（用顶部 cur_cycle 找）
+    cur_cycle = st.session_state.get("fcst_cur")
+    cutoff_mix = None
+    if cur_cycle:
+        row = by_week[by_week["FCST Cycle"].astype(str) == str(cur_cycle)]
+        if not row.empty:
+            cutoff_mix = float(row.iloc[0]["mix"]) if row.iloc[0]["mix"] is not None else None
+
+    def _fmt_int(x):
+        return f"{int(round(x)):,}"
+
+    def _fmt_pct(x):
+        return "—" if x is None or pd.isna(x) else f"{int(round(x))}%"
+
+    def _mix_bg_fg(pct):
+        if pct is None or pd.isna(pct):
+            return ("#f5f5f5", "#999999", False)
+        is_above = cutoff_mix is not None and pct > cutoff_mix
+        if is_above:
+            return ("#1a6b1a", "#ffffff", True)
+        return ("#e8f5e8", "#1a1a1a", False)
+
+    rows_html = []
+    for _, r in by_week.iterrows():
+        is_current = str(r["FCST Cycle"]) == str(cur_cycle)
+        bg_c, fg_c, bold_c = _mix_bg_fg(r["mix"])
+        fw = "bold" if bold_c else "normal"
+        row_bg = "#fffbe6" if is_current else "#ffffff"
+        cycle_label = f"<b>{_esc_html(str(r['FCST Cycle']))}</b>" if is_current else _esc_html(str(r["FCST Cycle"]))
+        rows_html.append(
+            f'<tr style="background:{row_bg}">'
+            f'<td class="lbl" style="background:{row_bg};font-weight:{fw};">{cycle_label}</td>'
+            f'<td class="num">{_fmt_int(r["_core"])}</td>'
+            f'<td class="num">{_fmt_int(r["_memo"])}</td>'
+            f'<td class="num">{_fmt_int(r["total"])}</td>'
+            f'<td class="mix" style="background:{bg_c};color:{fg_c};font-weight:{fw};">{_fmt_pct(r["mix"])}</td>'
+            f'</tr>'
+        )
+
+    html = f"""
+    <style>
+    .cmbw-wrap {{ overflow-x: auto; }}
+    .cmbw-table {{ width: 100%; table-layout: fixed; border-collapse: collapse; font-family: "Source Sans Pro", sans-serif; font-size: 11px; color: #31333F; }}
+    .cmbw-table * {{ box-sizing: border-box; }}
+    .cmbw-table th, .cmbw-table td {{ padding: 3px 6px; border-bottom: 1px solid #e0e0e0; vertical-align: middle; }}
+    .cmbw-table th {{ background: #f7f7f8; font-weight: 600; text-align: right; }}
+    .cmbw-table th:first-child {{ text-align: left; width: 90px; }}
+    .cmbw-table td.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 10px; }}
+    .cmbw-table td.lbl {{ text-align: left; font-weight: 500; }}
+    .cmbw-table td.mix {{ text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 500; }}
+    .theme-dark .cmbw-table {{ color: #f5f5f5; background: #0e1117; }}
+    .theme-dark .cmbw-table th {{ background: #262730; color: #f5f5f5; border-bottom-color: #48484f; }}
+    .theme-dark .cmbw-table td {{ border-bottom-color: #36363f; }}
+    .theme-dark .cmbw-table td.lbl {{ background: #1b1d26; color: #f5f5f5; }}
+    .cmbw-cap {{ font-size: 0.65rem; color: #888; margin-bottom: 0.2rem; }}
+    </style>
+    <div class="cmbw-wrap {_theme_cls()}">
+    <table class="cmbw-table">
+    <thead><tr>
+    <th>FCST Cycle</th><th>Core 金额</th><th>Memoline 金额</th><th>合计</th><th>Core MIX</th>
+    </tr></thead>
+    <tbody>{"".join(rows_html)}</tbody>
+    </table>
+    </div>
+    """
+    components.html(html, height=60 + len(by_week) * 24 + 2, scrolling=False)
 
 
 def _auto_refresh_on_data_change():
@@ -1980,40 +2091,77 @@ def main():
     if "run_export" not in st.session_state:
         st.session_state.run_export = False
 
-    # 顶部吸顶区：主视图切换 + FCST 维度/范围选择（始终钉在右页最上方，扁平紧凑）
+    # 顶部 fixed 区：主视图切换 + 数据版本/刷新 + FCST 维度/范围选择
+    # 真正钉在视口最顶端（position: fixed），整体高度压到约 1/5（约 40px）
     with st.container(border=True):
         st.markdown(
             '<div id="main-top-marker" style="display:none;"></div>',
             unsafe_allow_html=True,
         )
-        main_view = _segmented_buttons(
-            "视图",
-            ["FCST 分析", "明细 / 透视导出"],
-            key="main_view",
-            default="FCST 分析",
-        )
+        # Row 1：视图切换 | 数据版本 | 刷新
+        _r1c1, _r1c2, _r1c3 = st.columns([4, 5, 1])
+        with _r1c1:
+            main_view = st.radio(
+                "视图",
+                ["FCST 分析", "明细 / 透视导出"],
+                horizontal=True,
+                key="main_view",
+                label_visibility="collapsed",
+                index=0,
+            )
+        with _r1c2:
+            try:
+                _fcst_mt = _bucket_mtime("FCST")
+                if _fcst_mt:
+                    _mt_str = datetime.fromtimestamp(_fcst_mt).strftime("%Y-%m-%d %H:%M:%S")
+                    st.markdown(
+                        f"<span style='font-size:0.55rem;color:#888;'>FCST: {_mt_str}</span>",
+                        unsafe_allow_html=True,
+                    )
+            except Exception:  # noqa
+                pass
+        with _r1c3:
+            if st.button(
+                "🔄",
+                key="fcst_refresh",
+                use_container_width=True,
+                help="左侧数据源变更后若右侧未自动刷新，点此强制刷新",
+            ):
+                _invalidate_fcst_cache()
+                st.rerun()
+
+        # Row 2：FCST 控件（5 个 selectbox 横向）或导出提示
         if main_view == "FCST 分析":
             fcst_vals = _render_fcst_controls_inline()
         else:
             fcst_vals = None
             st.markdown(
-                "<small>请在左侧设置筛选与透视选项，点击【运行筛选/透视】后在此查看结果。</small>",
+                "<span style='font-size:0.55rem;color:#888;'>请在左侧设置筛选与透视，点击【运行筛选/透视】后在此查看结果。</span>",
                 unsafe_allow_html=True,
             )
 
-    # 吸顶 + 极紧凑样式：通过 #main-top-marker 定位顶部容器外框
+    # 顶部容器 fixed + 极紧凑样式：通过 #main-top-marker 定位
     st.markdown(
         """
         <style>
-        /* 顶部容器吸顶（钉在右页最上方），整体高度压到约 1/5 */
+        /* 顶部容器 fixed 钉在视口最顶端，2 行紧凑布局，高度约 40px */
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) {
-            position: sticky !important;
+            position: fixed !important;
             top: 0 !important;
-            z-index: 999 !important;
+            left: 0 !important;
+            right: 0 !important;
+            z-index: 9999 !important;
+            height: 40px !important;
+            overflow: hidden !important;
             background-color: var(--background-color) !important;
-            padding: 0.1rem 0.4rem !important;
-            margin-bottom: 0.25rem !important;
+            padding: 1px 6px !important;
+            margin: 0 !important;
             line-height: 1 !important;
+            box-sizing: border-box !important;
+        }
+        /* 防止内容被 fixed 顶部条遮挡，给主区域加 padding-top */
+        .main .block-container {
+            padding-top: 48px !important;
         }
         /* 极小字号与行高 */
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) h3 {
@@ -2025,18 +2173,18 @@ def main():
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stMarkdown p,
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stMarkdown small,
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stMarkdown span {
-            font-size: 0.6rem !important;
+            font-size: 0.55rem !important;
             margin: 0 !important;
             padding: 0 !important;
             line-height: 1.1 !important;
         }
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stCaption {
-            font-size: 0.55rem !important;
+            font-size: 0.5rem !important;
             margin: 0 !important;
         }
         /* 横向块紧贴、无间距 */
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) [data-testid="stHorizontalBlock"] {
-            gap: 0.2rem !important;
+            gap: 0.15rem !important;
             margin: 0 !important;
             padding: 0 !important;
             align-items: center !important;
@@ -2047,11 +2195,28 @@ def main():
         }
         /* 按钮极小 */
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stButton > button {
-            padding: 0.02rem 0.3rem !important;
-            font-size: 0.6rem !important;
-            min-height: 16px !important;
+            padding: 0rem 0.2rem !important;
+            font-size: 0.55rem !important;
+            min-height: 14px !important;
             line-height: 1 !important;
             border-radius: 3px !important;
+        }
+        /* radio 横向选项极小 */
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stRadio {
+            margin: 0 !important;
+            padding: 0 !important;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stRadio > label {
+            display: none !important;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stRadio [role="radiogroup"] {
+            gap: 0 !important;
+            margin: 0 !important;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stRadio [role="radiogroup"] label {
+            padding: 0 0.3rem !important;
+            font-size: 0.55rem !important;
+            min-height: 14px !important;
         }
         /* 下拉框极小 */
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stSelectbox {
@@ -2059,22 +2224,22 @@ def main():
             padding: 0 !important;
         }
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stSelectbox [data-baseweb="select"] {
-            min-height: 18px !important;
-            font-size: 0.6rem !important;
+            min-height: 16px !important;
+            font-size: 0.55rem !important;
         }
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stSelectbox [data-baseweb="select"] > div {
             padding-top: 0 !important;
             padding-bottom: 0 !important;
-            min-height: 18px !important;
+            min-height: 16px !important;
         }
-        /* 隐藏 selectbox 边框圆角过宽 */
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) [data-baseweb="select"] {
             border-radius: 3px !important;
         }
         /* 隐藏 warning 信息的留白 */
         [data-testid="stVerticalBlockBorderWrapper"]:has(#main-top-marker) .stAlert {
-            padding: 0.2rem 0.4rem !important;
-            font-size: 0.6rem !important;
+            padding: 0.1rem 0.3rem !important;
+            font-size: 0.55rem !important;
+            margin: 0 !important;
         }
         /* 每个分析模块的容器（差异分析 / by Week / Core MIX）略缩边距 */
         [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-module-marker),
