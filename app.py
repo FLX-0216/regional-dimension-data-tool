@@ -1365,6 +1365,38 @@ def _render_fcst_trend(fy, scope, sub_region):
     components.html(html, height=base_height + visible_rows * row_height, scrolling=False)
 
 
+def _load_core_mix_base(fy, fcst_mt, dgq_mt, hist_mt):
+    """Core MIX 基础数据加载（按数据桶 mtime 缓存）：
+    - concat FCST + 历史Union
+    - 统一补算 Core/Memoline
+    - 过滤 FY + 仅 APOS/POS
+    返回已处理好的 DataFrame。
+    """
+    fcst, _, _, _, _ = _load_fcst_analysis_data(fy, _mapping_mtime(), fcst_mt, dgq_mt, hist_mt)
+    parts = [fcst]
+    try:
+        hist = load_bucket("历史Union")
+        if not hist.empty:
+            for col in ("财年财季", "服务大区", "POS_APOS", "物料通路", "业绩考核USDK", "FCST Cycle"):
+                if col not in hist.columns:
+                    hist[col] = None
+            parts.append(hist)
+    except Exception:
+        pass
+    df = pd.concat(parts, ignore_index=True, sort=False)
+    df = add_core_memoline(df)
+    if "财年财季" in df.columns and fy:
+        df = df[df["财年财季"] == fy]
+    if "POS_APOS" in df.columns:
+        df = df[df["POS_APOS"].isin(["APOS", "POS"])]
+    if "业绩考核USDK" in df.columns:
+        df["业绩考核USDK"] = pd.to_numeric(df["业绩考核USDK"], errors="coerce").fillna(0)
+    if "Core/Memoline" in df.columns:
+        df["_core_amt"] = df["业绩考核USDK"].where(df["Core/Memoline"] == "Core", 0.0)
+        df["_memo_amt"] = df["业绩考核USDK"].where(df["Core/Memoline"] == "Memoline", 0.0)
+    return df
+
+
 def _render_core_mix(fy, scope, sub_region, cur_cycle):
     """Core MIX 棋盘格分析：Core 金额 ÷ (Core + Memoline) 金额。
 
@@ -1377,33 +1409,13 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     """
     import streamlit.components.v1 as components
 
-    fcst, _, _, _, _ = _load_fcst_analysis_data(
-        fy, _mapping_mtime(), _bucket_mtime("FCST"), _bucket_mtime("DG&Quota"), _bucket_mtime("历史Union")
+    df = _load_core_mix_base(
+        fy, _bucket_mtime("FCST"), _bucket_mtime("DG&Quota"), _bucket_mtime("历史Union")
     )
-    # 兼容历史数据：若桶内 Core/Memoline 列缺失或全空，实时补算
-    parts = [fcst]
-    try:
-        hist = load_bucket("历史Union")
-        if not hist.empty:
-            # 仅保留有 FY/scope 列的行
-            for col in ("财年财季", "服务大区", "POS_APOS", "物料通路", "业绩考核USDK"):
-                if col not in hist.columns:
-                    hist[col] = None
-            parts.append(hist)
-    except Exception:
-        pass
-    df = pd.concat(parts, ignore_index=True, sort=False)
-    # 统一补算 Core/Memoline（覆盖旧桶无值的情况）
-    df = add_core_memoline(df)
-    if "财年财季" in df.columns and fy:
-        df = df[df["财年财季"] == fy]
     if scope != "TTL" and "服务大区" in df.columns:
         df = df[df["服务大区"] == scope]
     if sub_region and "服务战区" in df.columns:
         df = df[df["服务战区"] == sub_region]
-    # 仅 APOS/POS 行参与 Core/Memoline 分类计算
-    if "POS_APOS" in df.columns:
-        df = df[df["POS_APOS"].isin(["APOS", "POS"])]
     # 棋盘格只展示选中的当前 Cycle（顶部"当前 FCST Cycle"选哪个就显示哪个）
     if "FCST Cycle" in df.columns and cur_cycle:
         df = df[df["FCST Cycle"] == cur_cycle]
@@ -1454,11 +1466,10 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
         )
 
     # 数据范围：聚合所选范围内【全部周 + FCST/ACT】的 Core/Memoline（不局限于当前 Cycle）
-    # 仅 Core/Memoline 有值的行参与计算
+    # 仅 Core/Memoline 有值的行参与计算（直接复用缓存的 _core_amt / _memo_amt）
     valid = df[df["Core/Memoline"].isin(["Core", "Memoline"])].copy()
-    valid["_amt"] = pd.to_numeric(valid["业绩考核USDK"], errors="coerce").fillna(0)
-    valid["_core"] = valid["_amt"].where(valid["Core/Memoline"] == "Core", 0.0)
-    valid["_memo"] = valid["_amt"].where(valid["Core/Memoline"] == "Memoline", 0.0)
+    valid["_core"] = valid["_core_amt"]
+    valid["_memo"] = valid["_memo_amt"]
 
     def _mix(core, memo):
         s = core + memo
@@ -1525,8 +1536,8 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
         return "—" if pct is None or pd.isna(pct) else f"{int(round(pct))}%"
 
     # 汇总行（置顶）：汇总列=总体，横向列=各横向维度自身 mix
-    # 汇总行首列不再重复纵向列标题，仅保留样式占位
-    summary_cells = ['<td class="dim-label summary-label-cell"></td>']
+    # 汇总行首列显示"汇总"标签（与汇总列标题对应）
+    summary_cells = ['<td class="dim-label summary-label-cell"><b>汇总</b></td>']
     bg, fg, bold = _mix_color(total_mix, total_mix)
     fw = "bold" if bold else "normal"
     summary_cells.append(f'<td class="mix-cell mix-summary" style="background:{bg};color:{fg};font-weight:{fw}"><b>{_fmt_pct(total_mix)}</b></td>')
@@ -1564,8 +1575,8 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
                 f'<tr class="sep-row"><td colspan="{n_cols}"></td></tr>'
             )
 
-    # 表头
-    h_header_cells = [f'<th class="dim-label">{DIM_LABELS[vertical_dim]}</th>', '<th class="mix-header mix-summary">汇总<br>Core MIX</th>']
+    # 表头：汇总列标题不带 Core MIX（汇总行已显示 Core MIX%）
+    h_header_cells = [f'<th class="dim-label">{DIM_LABELS[vertical_dim]}</th>', '<th class="mix-header mix-summary">汇总</th>']
     for _, h in h_grp.iterrows():
         h_val = h[horizontal_dim]
         mix = h["mix"]
@@ -1629,80 +1640,88 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
 
 
 def _render_core_mix_by_week(fy, scope, sub_region):
-    """by Week Core MIX 分析：按 FCST Cycle（Week1..WeekN）展示每个周的
-    Core 金额、Memoline 金额、合计、Core MIX%。
-
-    - 数据范围：所选 FY + scope/sub_region 下【全部周 + FCST/ACT(历史Union)】
-    - 绿色虚线：Core MIX > 当前 Cycle 的 Core MIX 时标记为超过（参考阈值）
-    - 颜色：复用棋盘格的 > cutoff 深绿加粗、≤ cutoff 浅绿配色
+    """by Week Core MIX 分析（跟随 Core MIX 棋盘格的横向维度）：
+    - 行：每个 FCST Cycle（Week1..WeekN），按自然序号排序
+    - 列：跟随 Core MIX 棋盘格的横向维度（默认"产线名称"），各维度值 + 汇总 + Trend
+    - 单元格：Core MIX%（行=周，列=横向维度值）
+    - 汇总列：该周的整体 Core MIX
+    - 最后一列 Trend：该周 Core MIX 在各横向维度上的分布柱状图（by week trend）
+    - 数据范围：所选 FY + scope/sub_region + 全部周（不按 cur_cycle 过滤）
+    - 配色：复用 > cutoff 深绿加粗白字、≤ cutoff 浅绿深色字
     """
     import re as _re
     import streamlit.components.v1 as components
 
-    fcst, _, _, _, _ = _load_fcst_analysis_data(
-        fy, _mapping_mtime(), _bucket_mtime("FCST"), _bucket_mtime("DG&Quota"), _bucket_mtime("历史Union")
+    df = _load_core_mix_base(
+        fy, _bucket_mtime("FCST"), _bucket_mtime("DG&Quota"), _bucket_mtime("历史Union")
     )
-    parts = [fcst]
-    try:
-        hist = load_bucket("历史Union")
-        if not hist.empty:
-            for col in ("财年财季", "服务大区", "POS_APOS", "物料通路", "业绩考核USDK", "FCST Cycle"):
-                if col not in hist.columns:
-                    hist[col] = None
-            parts.append(hist)
-    except Exception:
-        pass
-    df = pd.concat(parts, ignore_index=True, sort=False)
-    df = add_core_memoline(df)
-    if "财年财季" in df.columns and fy:
-        df = df[df["财年财季"] == fy]
     if scope != "TTL" and "服务大区" in df.columns:
         df = df[df["服务大区"] == scope]
     if sub_region and "服务战区" in df.columns:
         df = df[df["服务战区"] == sub_region]
-    if "POS_APOS" in df.columns:
-        df = df[df["POS_APOS"].isin(["APOS", "POS"])]
     if df.empty or "FCST Cycle" not in df.columns:
         st.info("所选范围内无 by Week Core MIX 数据。")
         return
 
+    # 跟随 Core MIX 棋盘格的横向维度
+    horizontal_dim = st.session_state.get("core_mix_horizontal", "产线名称")
+    if horizontal_dim not in df.columns:
+        st.info(f"横向维度 {horizontal_dim} 不在数据中。")
+        return
+
     st.markdown(
-        "<small style='color:#666;'>按 FCST Cycle 展示每个周的 Core / Memoline 金额及 Core MIX%；"
-        "绿色虚线标示超过所选当前 Cycle 的 Core MIX。</small>",
+        f"<small style='color:#666;'>按 FCST Cycle 展示每个周在【<b>{_esc_html(horizontal_dim)}</b>】维度下的 Core MIX%；"
+        "汇总列=该周整体 Core MIX；最后一列=该周在各维度上的分布柱状图（by week trend）。</small>",
         unsafe_allow_html=True,
     )
 
     valid = df[df["Core/Memoline"].isin(["Core", "Memoline"])].copy()
-    valid["_amt"] = pd.to_numeric(valid["业绩考核USDK"], errors="coerce").fillna(0)
-    valid["_core"] = valid["_amt"].where(valid["Core/Memoline"] == "Core", 0.0)
-    valid["_memo"] = valid["_amt"].where(valid["Core/Memoline"] == "Memoline", 0.0)
 
     def _wk_key(w):
         nums = _re.findall(r"\d+", str(w))
         return int(nums[0]) if nums else 0
 
-    by_week = (
-        valid.groupby("FCST Cycle")
-        .agg(_core=("_core", "sum"), _memo=("_memo", "sum"))
+    def _mix(c, m):
+        s = c + m
+        return (c / s * 100) if s > 0 else None
+
+    # 各横向维度值（按自身 Core MIX 降序）
+    h_grp = (
+        valid.groupby(horizontal_dim, dropna=False)
+        .agg(_core=("_core_amt", "sum"), _memo=("_memo_amt", "sum"))
         .reset_index()
     )
-    by_week["total"] = by_week["_core"] + by_week["_memo"]
-    by_week["mix"] = by_week.apply(
-        lambda r: (r["_core"] / r["total"] * 100) if r["total"] > 0 else None, axis=1
+    h_grp["mix"] = h_grp.apply(lambda r: _mix(r["_core"], r["_memo"]), axis=1)
+    h_grp = h_grp[h_grp["_core"] + h_grp["_memo"] > 0].sort_values(
+        "mix", ascending=False, na_position="last"
+    ).reset_index(drop=True)
+    h_vals = h_grp[horizontal_dim].tolist()
+
+    # 按周 × 横向维度 交叉聚合 Core MIX
+    cross = (
+        valid.groupby(["FCST Cycle", horizontal_dim], dropna=False)
+        .agg(_core=("_core_amt", "sum"), _memo=("_memo_amt", "sum"))
+        .reset_index()
     )
-    by_week = by_week[by_week["total"] > 0]
+    cross["mix"] = cross.apply(lambda r: _mix(r["_core"], r["_memo"]), axis=1)
+    cross_idx = cross.set_index(["FCST Cycle", horizontal_dim])["mix"].to_dict()
+
+    # 按周汇总
+    by_week = (
+        valid.groupby("FCST Cycle")
+        .agg(_core=("_core_amt", "sum"), _memo=("_memo_amt", "sum"))
+        .reset_index()
+    )
+    by_week["mix"] = by_week.apply(lambda r: _mix(r["_core"], r["_memo"]), axis=1)
+    by_week = by_week[by_week["_core"] + by_week["_memo"] > 0]
     by_week = by_week.sort_values("FCST Cycle", key=lambda s: s.map(_wk_key)).reset_index(drop=True)
 
-    # 参考阈值：当前 Cycle 的 Core MIX（用顶部 cur_cycle 找）
     cur_cycle = st.session_state.get("fcst_cur")
     cutoff_mix = None
     if cur_cycle:
         row = by_week[by_week["FCST Cycle"].astype(str) == str(cur_cycle)]
-        if not row.empty:
-            cutoff_mix = float(row.iloc[0]["mix"]) if row.iloc[0]["mix"] is not None else None
-
-    def _fmt_int(x):
-        return f"{int(round(x)):,}"
+        if not row.empty and row.iloc[0]["mix"] is not None:
+            cutoff_mix = float(row.iloc[0]["mix"])
 
     def _fmt_pct(x):
         return "—" if x is None or pd.isna(x) else f"{int(round(x))}%"
@@ -1715,50 +1734,121 @@ def _render_core_mix_by_week(fy, scope, sub_region):
             return ("#1a6b1a", "#ffffff", True)
         return ("#e8f5e8", "#1a1a1a", False)
 
+    def _spark_bars(vals, color):
+        """每行一个微型水平柱状条（by week trend）。"""
+        n = len(vals)
+        if n == 0:
+            return ""
+        W, H = 100, 22
+        valid_vals = [v for v in vals if v is not None and not pd.isna(v)]
+        if not valid_vals:
+            return ""
+        max_v = max(valid_vals)
+        min_v = min(valid_vals)
+        rng = max_v - min_v
+        bar_w = max(2, (W - 2) / n - 1)
+        rects = []
+        for i, v in enumerate(vals):
+            if v is None or pd.isna(v):
+                continue
+            x = 1 + i * (bar_w + 1)
+            if rng == 0:
+                h = H * 0.6
+            else:
+                h = max(2, ((v - min_v) / rng) * (H - 4) + 2)
+            y = (H - h) / 2
+            rects.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" fill="{color}"/>'
+            )
+        return (
+            f'<svg viewBox="0 0 {W} {H}" class="cmbw-spark">'
+            + "".join(rects)
+            + "</svg>"
+        )
+
+    # 汇总列 Core MIX（整体 > cutoff 深绿，否则浅绿）
+    header_cells = [
+        f'<th class="lbl">FCST Cycle</th>',
+    ]
+    for h_val in h_vals:
+        mix = h_grp[h_grp[horizontal_dim] == h_val].iloc[0]["mix"] if (h_grp[horizontal_dim] == h_val).any() else None
+        header_cells.append(
+            f'<th class="num">{_esc_html(str(h_val))}<br><span class="h-mix">{_fmt_pct(mix)}</span></th>'
+        )
+    header_cells.append('<th class="num sumcol">汇总</th>')
+    header_cells.append('<th class="num trendcol">Trend</th>')
+
     rows_html = []
     for _, r in by_week.iterrows():
-        is_current = str(r["FCST Cycle"]) == str(cur_cycle)
-        bg_c, fg_c, bold_c = _mix_bg_fg(r["mix"])
-        fw = "bold" if bold_c else "normal"
+        cycle = r["FCST Cycle"]
+        is_current = str(cycle) == str(cur_cycle)
         row_bg = "#fffbe6" if is_current else "#ffffff"
-        cycle_label = f"<b>{_esc_html(str(r['FCST Cycle']))}</b>" if is_current else _esc_html(str(r["FCST Cycle"]))
-        rows_html.append(
-            f'<tr style="background:{row_bg}">'
-            f'<td class="lbl" style="background:{row_bg};font-weight:{fw};">{cycle_label}</td>'
-            f'<td class="num">{_fmt_int(r["_core"])}</td>'
-            f'<td class="num">{_fmt_int(r["_memo"])}</td>'
-            f'<td class="num">{_fmt_int(r["total"])}</td>'
-            f'<td class="mix" style="background:{bg_c};color:{fg_c};font-weight:{fw};">{_fmt_pct(r["mix"])}</td>'
-            f'</tr>'
+        cells = [
+            f'<td class="lbl" style="background:{row_bg};">{"<b>" + _esc_html(str(cycle)) + "</b>" if is_current else _esc_html(str(cycle))}</td>',
+        ]
+        row_vals = []  # 用于最后一列 trend
+        for h_val in h_vals:
+            mix = cross_idx.get((cycle, h_val), None)
+            row_vals.append(mix)
+            bg, fg, bold = _mix_bg_fg(mix)
+            fw = "bold" if bold else "normal"
+            cells.append(
+                f'<td class="num" style="background:{bg};color:{fg};font-weight:{fw};">{_fmt_pct(mix)}</td>'
+            )
+        # 汇总列 = 该周整体 Core MIX
+        bg, fg, bold = _mix_bg_fg(r["mix"])
+        fw = "bold" if bold else "normal"
+        cells.append(
+            f'<td class="num sumcol" style="background:{bg};color:{fg};font-weight:{fw};">{_fmt_pct(r["mix"])}</td>'
         )
+        # 最后一列 trend：该周在各横向维度上的分布柱状图
+        spark_color = "#1a6b1a" if (cutoff_mix is not None and r["mix"] is not None and r["mix"] > cutoff_mix) else "#888"
+        cells.append(
+            f'<td class="num trendcol" style="background:{row_bg};">{_spark_bars(row_vals, spark_color)}</td>'
+        )
+        rows_html.append(
+            f'<tr style="background:{row_bg};">{"".join(cells)}</tr>'
+        )
+
+    n_cols = 1 + len(h_vals) + 2
+    colgroup = (
+        '<colgroup>'
+        + '<col style="width:90px;">'
+        + "".join(['<col style="width:70px;">'] * len(h_vals))
+        + '<col style="width:60px;">'
+        + '<col style="width:110px;">'
+        + '</colgroup>'
+    )
 
     html = f"""
     <style>
     .cmbw-wrap {{ overflow-x: auto; }}
-    .cmbw-table {{ width: 100%; table-layout: fixed; border-collapse: collapse; font-family: "Source Sans Pro", sans-serif; font-size: 11px; color: #31333F; }}
+    .cmbw-table {{ width: 100%; border-collapse: collapse; font-family: "Source Sans Pro", sans-serif; font-size: 11px; color: #31333F; }}
     .cmbw-table * {{ box-sizing: border-box; }}
-    .cmbw-table th, .cmbw-table td {{ padding: 3px 6px; border-bottom: 1px solid #e0e0e0; vertical-align: middle; }}
-    .cmbw-table th {{ background: #f7f7f8; font-weight: 600; text-align: right; }}
-    .cmbw-table th:first-child {{ text-align: left; width: 90px; }}
-    .cmbw-table td.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 10px; }}
+    .cmbw-table th, .cmbw-table td {{ padding: 3px 5px; border-bottom: 1px solid #e0e0e0; border-right: 1px solid #e0e0e0; vertical-align: middle; }}
+    .cmbw-table th:last-child, .cmbw-table td:last-child {{ border-right: none; }}
+    .cmbw-table th {{ background: #f7f7f8; font-weight: 600; text-align: center; white-space: nowrap; }}
+    .cmbw-table th.lbl {{ text-align: left; }}
+    .cmbw-table td.num {{ text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 10px; }}
     .cmbw-table td.lbl {{ text-align: left; font-weight: 500; }}
-    .cmbw-table td.mix {{ text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 500; }}
+    .cmbw-table .sumcol {{ font-weight: 600; }}
+    .cmbw-table .trendcol {{ padding: 1px 4px; }}
+    .cmbw-table .h-mix {{ font-size: 9px; color: #666; font-weight: 400; }}
+    .cmbw-spark {{ width: 100px; height: 22px; display: block; margin: 0 auto; }}
     .theme-dark .cmbw-table {{ color: #f5f5f5; background: #0e1117; }}
-    .theme-dark .cmbw-table th {{ background: #262730; color: #f5f5f5; border-bottom-color: #48484f; }}
-    .theme-dark .cmbw-table td {{ border-bottom-color: #36363f; }}
+    .theme-dark .cmbw-table th {{ background: #262730; color: #f5f5f5; border-bottom-color: #48484f; border-right-color: #48484f; }}
+    .theme-dark .cmbw-table td {{ border-bottom-color: #36363f; border-right-color: #36363f; }}
     .theme-dark .cmbw-table td.lbl {{ background: #1b1d26; color: #f5f5f5; }}
-    .cmbw-cap {{ font-size: 0.65rem; color: #888; margin-bottom: 0.2rem; }}
     </style>
     <div class="cmbw-wrap {_theme_cls()}">
     <table class="cmbw-table">
-    <thead><tr>
-    <th>FCST Cycle</th><th>Core 金额</th><th>Memoline 金额</th><th>合计</th><th>Core MIX</th>
-    </tr></thead>
+    {colgroup}
+    <thead><tr>{"".join(header_cells)}</tr></thead>
     <tbody>{"".join(rows_html)}</tbody>
     </table>
     </div>
     """
-    components.html(html, height=60 + len(by_week) * 24 + 2, scrolling=False)
+    components.html(html, height=70 + len(by_week) * 26 + 2, scrolling=False)
 
 
 def _auto_refresh_on_data_change():
