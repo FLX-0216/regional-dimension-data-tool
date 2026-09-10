@@ -1029,85 +1029,130 @@ def _render_kpi_dashboard(ttl):
 
 def render_fcst_analysis():
     """右侧 Tab1：FCST 分析（横向按钮筛选 + 实时联动 + 层级树表下钻）。"""
-    st.subheader("FCST 分析")
-    # 刷新按钮 + 数据版本：左侧数据源变更后若右侧未自动刷新，可手动强制刷新
-    _rf_c1, _rf_c2 = st.columns([5, 1])
-    with _rf_c1:
+    # 控制区整体放在一个带边框的容器里，并通过 CSS 吸顶，滚动时始终可见
+    with st.container(border=True):
         st.markdown(
-            "<small>选择财年财季、当前/对比 FCST Cycle 与范围，看板与下钻实时联动。</small>",
+            '<div id="fcst-controls-marker" style="display:none;"></div>',
             unsafe_allow_html=True,
         )
-        try:
-            _fcst_mt = _bucket_mtime("FCST")
-            if _fcst_mt:
-                _mt_str = datetime.fromtimestamp(_fcst_mt).strftime("%Y-%m-%d %H:%M:%S")
-                st.caption(f"FCST 数据版本（最后写入）：{_mt_str}")
-        except Exception:  # noqa
-            pass
-    with _rf_c2:
-        if st.button(
-            "🔄 刷新 FCST 数据",
-            key="fcst_refresh",
-            use_container_width=True,
-            help="左侧数据源变更后若右侧未自动刷新，点此强制刷新：看板 / 树表 / by Week 趋势",
-        ):
-            _invalidate_fcst_cache()
-            st.rerun()
+        st.subheader("FCST 分析")
+        # 刷新按钮 + 数据版本：左侧数据源变更后若右侧未自动刷新，可手动强制刷新
+        _rf_c1, _rf_c2 = st.columns([5, 1])
+        with _rf_c1:
+            st.markdown(
+                "<small>选择财年财季、当前/对比 FCST Cycle 与范围，看板与下钻实时联动。</small>",
+                unsafe_allow_html=True,
+            )
+            try:
+                _fcst_mt = _bucket_mtime("FCST")
+                if _fcst_mt:
+                    _mt_str = datetime.fromtimestamp(_fcst_mt).strftime("%Y-%m-%d %H:%M:%S")
+                    st.caption(f"FCST 数据版本（最后写入）：{_mt_str}")
+            except Exception:  # noqa
+                pass
+        with _rf_c2:
+            if st.button(
+                "🔄 刷新 FCST 数据",
+                key="fcst_refresh",
+                use_container_width=True,
+                help="左侧数据源变更后若右侧未自动刷新，点此强制刷新：看板 / 树表 / by Week 趋势",
+            ):
+                _invalidate_fcst_cache()
+                st.rerun()
 
-    # 缩小 FCST 分析区域内按钮尺寸，使筛选控件更紧凑
+        meta = load_bucket_columns("FCST", ["财年财季", "FCST Cycle", "服务大区", "服务战区"])
+        if meta.empty:
+            st.warning("FCST 数据池为空，请先在左侧上传 FCST 数据。")
+            return
+        fy_opts = sorted(meta["财年财季"].dropna().unique().tolist())
+        cyc_opts = sorted(meta["FCST Cycle"].dropna().unique().tolist(), key=week_sort_key)
+        region_opts = sorted(meta["服务大区"].dropna().unique().tolist())
+
+        # 三个核心筛选控件放在同一行，label 统一用 <small> 以保证对齐
+        c1, c2, c3 = st.columns([3, 1, 1])
+        with c1:
+            fy = _segmented_buttons("财年财季", fy_opts, key="fcst_fy", default=fy_opts[-1] if fy_opts else None)
+        with c2:
+            st.markdown("<small>当前 FCST Cycle</small>", unsafe_allow_html=True)
+            cur_cycle = st.selectbox(
+                "当前 FCST Cycle", cyc_opts, index=len(cyc_opts) - 1,
+                key="fcst_cur", label_visibility="collapsed"
+            )
+        with c3:
+            st.markdown("<small>对比 FCST Cycle</small>", unsafe_allow_html=True)
+            cmp_cycle = st.selectbox(
+                "对比 FCST Cycle", cyc_opts, index=max(0, len(cyc_opts) - 2),
+                key="fcst_cmp", label_visibility="collapsed"
+            )
+
+        scope = _segmented_buttons("范围", ["TTL"] + region_opts, key="fcst_scope", default="TTL")
+
+        sub_region = None
+        if scope != "TTL":
+            sub_opts = sorted(meta[meta["服务大区"] == scope]["服务战区"].dropna().unique().tolist())
+            sub_sel = _segmented_buttons(
+                "战区（不选=该大区合计）",
+                ["（合计）"] + sub_opts,
+                key="fcst_sub",
+                default="（合计）",
+            )
+            if sub_sel != "（合计）":
+                sub_region = sub_sel
+
+    # 吸顶 + 紧凑样式：通过 marker 定位控制区外框，并收紧内部间距/字号
     st.markdown(
         """
         <style>
-        .stButton > button {
-            padding: 0.15rem 0.4rem !important;
-            font-size: 0.75rem !important;
-            min-height: 26px !important;
+        /* 控制区外框吸顶 */
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-controls-marker) {
+            position: sticky !important;
+            top: 0 !important;
+            z-index: 999 !important;
+            background-color: var(--background-color) !important;
+            padding: 0.3rem 0.6rem 0.4rem 0.6rem !important;
+            margin-bottom: 0.4rem !important;
+        }
+        /* 紧凑化标题与说明 */
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-controls-marker) h3 {
+            font-size: 0.95rem !important;
+            margin: 0 0 0.15rem 0 !important;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-controls-marker) .stMarkdown p,
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-controls-marker) .stMarkdown small {
+            font-size: 0.7rem !important;
+            margin-bottom: 0.05rem !important;
             line-height: 1.2 !important;
-            border-radius: 6px !important;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-controls-marker) .stCaption {
+            font-size: 0.65rem !important;
+            margin-top: 0.05rem !important;
+            margin-bottom: 0.1rem !important;
+        }
+        /* 收紧横向块间距 */
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-controls-marker) [data-testid="stHorizontalBlock"] {
+            gap: 0.25rem !important;
+            margin-bottom: 0.1rem !important;
+            align-items: flex-end !important;
+        }
+        /* 缩小按钮尺寸 */
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-controls-marker) .stButton > button {
+            padding: 0.08rem 0.25rem !important;
+            font-size: 0.68rem !important;
+            min-height: 20px !important;
+            line-height: 1.1 !important;
+            border-radius: 4px !important;
+        }
+        /* 下拉框更紧凑 */
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-controls-marker) .stSelectbox {
+            margin-bottom: 0.05rem !important;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"]:has(#fcst-controls-marker) .stSelectbox [data-baseweb="select"] {
+            min-height: 24px !important;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
-
-    meta = load_bucket_columns("FCST", ["财年财季", "FCST Cycle", "服务大区", "服务战区"])
-    if meta.empty:
-        st.warning("FCST 数据池为空，请先在左侧上传 FCST 数据。")
-        return
-    fy_opts = sorted(meta["财年财季"].dropna().unique().tolist())
-    cyc_opts = sorted(meta["FCST Cycle"].dropna().unique().tolist(), key=week_sort_key)
-    region_opts = sorted(meta["服务大区"].dropna().unique().tolist())
-
-    # 三个核心筛选控件放在同一行，label 统一用 <small> 以保证对齐
-    c1, c2, c3 = st.columns([3, 1, 1])
-    with c1:
-        fy = _segmented_buttons("财年财季", fy_opts, key="fcst_fy", default=fy_opts[-1] if fy_opts else None)
-    with c2:
-        st.markdown("<small>当前 FCST Cycle</small>", unsafe_allow_html=True)
-        cur_cycle = st.selectbox(
-            "当前 FCST Cycle", cyc_opts, index=len(cyc_opts) - 1,
-            key="fcst_cur", label_visibility="collapsed"
-        )
-    with c3:
-        st.markdown("<small>对比 FCST Cycle</small>", unsafe_allow_html=True)
-        cmp_cycle = st.selectbox(
-            "对比 FCST Cycle", cyc_opts, index=max(0, len(cyc_opts) - 2),
-            key="fcst_cmp", label_visibility="collapsed"
-        )
-
-    scope = _segmented_buttons("范围", ["TTL"] + region_opts, key="fcst_scope", default="TTL")
-
-    sub_region = None
-    if scope != "TTL":
-        sub_opts = sorted(meta[meta["服务大区"] == scope]["服务战区"].dropna().unique().tolist())
-        sub_sel = _segmented_buttons(
-            "战区（不选=该大区合计）",
-            ["（合计）"] + sub_opts,
-            key="fcst_sub",
-            default="（合计）",
-        )
-        if sub_sel != "（合计）":
-            sub_region = sub_sel
 
     # 用 session_state 缓存上次计算结果，左侧导出设置变化时不重新算 FCST
     # 注意：cache_key 必须包含三个数据桶的 mtime，否则上传/清理数据后
@@ -1348,6 +1393,13 @@ def _render_fcst_trend(fy, scope, sub_region):
     </div>
     <script>
     (function() {{
+        function adjustIframeHeight() {{
+            var wrap = document.querySelector('.trend-table-wrap');
+            var frame = window.frameElement;
+            if (!wrap || !frame) return;
+            // 让 iframe 高度刚好包裹当前可见内容（+10px 缓冲避免滚动条）
+            frame.style.height = (wrap.offsetHeight + 10) + 'px';
+        }}
         document.querySelectorAll('.tree-toggle').forEach(function(toggle) {{
             toggle.addEventListener('click', function(e) {{
                 e.stopPropagation();
@@ -1357,15 +1409,22 @@ def _render_fcst_trend(fy, scope, sub_region):
                 document.querySelectorAll('.child-' + target).forEach(function(row) {{
                     row.style.display = expanded ? 'none' : 'table-row';
                 }});
+                // 收起/展开后立即重算高度，避免 iframe 内部留白
+                setTimeout(adjustIframeHeight, 0);
             }});
         }});
+        // 初始化也调整一次，确保初始高度紧凑
+        adjustIframeHeight();
     }})();
     </script>
     """
 
-    # 折叠大客户明细时只保留 TTL + Solutions + Services 三行，避免大片留白
+    # 折叠大客户明细时只保留 TTL + Solutions + Services 三行，避免大片留白。
+    # 点击小三角时通过 JS 自动重算 iframe 高度，彻底解决展开/收起后残留空白。
     visible_rows = len(rows_html) if show_customers else 3
-    components.html(html, height=110 + visible_rows * 34, scrolling=True)
+    base_height = 80
+    row_height = 28
+    components.html(html, height=base_height + visible_rows * row_height, scrolling=False)
 
 
 def _render_core_mix(fy, scope, sub_region, cur_cycle):
