@@ -888,7 +888,7 @@ def _build_tree_html(df):
 
     header_html = "".join([f"<th>{h}</th>" for h in headers])
     table_html = (
-        f'<div class="{_theme_cls()}">'
+        f'<div class="tree-wrap {_theme_cls()}">'
         '<table class="tree-table"><thead><tr>' + header_html + '</tr></thead><tbody>'
         + "".join(rows_html) + '</tbody></table>'
         '</div>'
@@ -896,6 +896,8 @@ def _build_tree_html(df):
 
     css = """
     <style>
+    /* 限高 + 内部滚动：展开层级过多时不出框，表头吸顶 */
+    .tree-wrap { max-height: 560px; overflow: auto; }
     .tree-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-family: "Source Sans Pro", sans-serif; font-size: 14px; color: #31333F; }
     .tree-table * { box-sizing: border-box; }
     .tree-table th, .tree-table td { padding: 8px 10px; border-bottom: 1px solid #e6e6e6; vertical-align: middle; }
@@ -960,31 +962,9 @@ def _build_tree_html(df):
                 var expanded = this.textContent === '▼';
                 this.textContent = expanded ? '▶' : '▼';
                 setChildrenDisplay(rowId, !expanded);
-                // 展开/收起后重算 iframe 高度，避免残留空白或内容被裁切
-                setTimeout(adjustIframeHeight, 0);
-                setTimeout(adjustIframeHeight, 60);
+                // 容器限高内部滚动，无需再调整 iframe 高度
             });
         });
-
-        function adjustIframeHeight() {
-            var wrap = document.querySelector('.tree-table-wrap') || document.querySelector('.tree-table');
-            if (!wrap) return;
-            var newHeight = wrap.offsetHeight + 8;
-            var frame = window.frameElement;
-            if (frame) { frame.style.height = newHeight + 'px'; return; }
-            try {
-                var iframes = window.parent.document.querySelectorAll('iframe');
-                for (var i = 0; i < iframes.length; i++) {
-                    if (iframes[i].contentWindow === window) {
-                        iframes[i].style.height = newHeight + 'px';
-                        return;
-                    }
-                }
-            } catch (err) { /* 跨源时静默失败 */ }
-        }
-        adjustIframeHeight();
-        setTimeout(adjustIframeHeight, 50);
-        setTimeout(adjustIframeHeight, 150);
     })();
     </script>
     """
@@ -992,16 +972,16 @@ def _build_tree_html(df):
 
 
 def _render_tree_table(df):
-    """用 Streamlit HTML 组件渲染可折叠树表（高度随可见行数自适应，展开/收起由 JS 动态调整）。"""
+    """用 Streamlit HTML 组件渲染可折叠树表（容器限高内部滚动，表头吸顶，展开再多也不出框）。"""
     import streamlit.components.v1 as components
     html = _build_tree_html(df)
-    # 初始可见行：level<2（TTL/APOS/POS、产线大类）；JS 加载后按实际内容精确调整
+    # 初始可见行：level<2（TTL/APOS/POS、产线大类）；超出限高时容器内部滚动
     try:
         visible_rows = int((pd.to_numeric(df["level"], errors="coerce") < 2).sum())
     except Exception:  # noqa
         visible_rows = len(df)
     visible_rows = max(1, visible_rows)
-    components.html(html, height=46 + visible_rows * 36 + 10, scrolling=False)
+    components.html(html, height=min(46 + visible_rows * 36 + 10, 590), scrolling=False)
 
 
 def _render_kpi_dashboard(ttl):
@@ -1318,7 +1298,7 @@ def _render_fcst_trend(fy, scope, sub_region):
     week_headers = "".join([f'<th class="num week-header">{w}</th>' for w in weeks])
     html = f"""
     <style>
-    .trend-table-wrap {{ overflow-x: auto; }}
+    .trend-table-wrap {{ overflow: auto; max-height: 560px; }}
     .trend-hier-table {{ width: 100%; table-layout: fixed; border-collapse: collapse; font-family: "Source Sans Pro", sans-serif; font-size: 11px; color: #31333F; }}
     .trend-hier-table * {{ box-sizing: border-box; }}
     .trend-hier-table th, .trend-hier-table td {{ padding: 5px 6px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }}
@@ -1366,42 +1346,17 @@ def _render_fcst_trend(fy, scope, sub_region):
     <tbody>{"".join(rows_html)}</tbody>
     </table>
     </div>
-    <script>
-    (function() {{
-        function adjustIframeHeight() {{
-            var wrap = document.querySelector('.trend-table-wrap');
-            if (!wrap) return;
-            var newHeight = wrap.offsetHeight + 6;
-            // 优先用 frameElement（srcdoc 同源 iframe），失败则回退到 parent 中查找
-            var frame = window.frameElement;
-            if (frame) {{
-                frame.style.height = newHeight + 'px';
-                return;
-            }}
-            try {{
-                var iframes = window.parent.document.querySelectorAll('iframe');
-                for (var i = 0; i < iframes.length; i++) {{
-                    if (iframes[i].contentWindow === window) {{
-                        iframes[i].style.height = newHeight + 'px';
-                        return;
-                    }}
-                }}
-            }} catch (e) {{ /* 跨源时静默失败 */ }}
-        }}
-        // 初始及布局稳定后多次重算高度，确保 iframe 与内容完全贴合、无留白
-        adjustIframeHeight();
-        setTimeout(adjustIframeHeight, 50);
-        setTimeout(adjustIframeHeight, 150);
-        setTimeout(adjustIframeHeight, 300);
-    }})();
-    </script>
     {_THEME_RUNTIME_JS}
     """
 
-    # 初始高度按实际渲染行数估算；JS 在加载后会再次精确调整，避免展开/收起后残留空白。
+    # 容器限高内部滚动：展开大客户再多也不出框；少量行时按行数收紧 iframe 高度
     base_height = 80
     row_height = 28
-    components.html(html, height=base_height + len(rows_html) * row_height, scrolling=False)
+    components.html(
+        html,
+        height=min(base_height + len(rows_html) * row_height, 590),
+        scrolling=False,
+    )
 
 
 def _load_core_mix_base(fy, fcst_mt, dgq_mt, hist_mt):
@@ -1463,7 +1418,9 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
         return
 
     st.markdown(
-        "<small>Core MIX = Core 金额 ÷ (Core + Memoline) 金额；选择纵向/横向维度，生成可交互棋盘格。</small>",
+        "<small>Core MIX = Core 金额 ÷ (Core + Memoline) 金额；选择纵向/横向维度，生成可交互棋盘格。"
+        "配色以【总体 Core MIX】为基准：≥基准=绿色渐变（值越大越深，白字加粗），&lt;基准=橙色渐变"
+        "（值越小越深，黑字）；汇总列白底绿字加粗放大。</small>",
         unsafe_allow_html=True,
     )
 
@@ -1541,44 +1498,34 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
         st.info("所选维度下无有效 Core/Memoline 数据。")
         return
 
+    # 渐变刻度（与 by Week Core MIX 同款）：以总体 Core MIX 为基准，
+    # ≥基准=绿色渐变（值越大越深，白字加粗）；<基准=橙色渐变（值越小越深，黑字不加粗）
+    _pool = [v for v in cross_idx.values() if v is not None and not pd.isna(v)]
+    _pool += [v for v in v_grp["mix"].tolist() if v is not None and not pd.isna(v)]
+    _pool += [v for v in h_grp["mix"].tolist() if v is not None and not pd.isna(v)]
+    _max_excess = max([v - total_mix for v in _pool if v >= total_mix] or [0.0])
+    _max_deficit = max([total_mix - v for v in _pool if v < total_mix] or [0.0])
+
+    def _blend(c1, c2, t):
+        return "#%02x%02x%02x" % tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
+
     def _mix_color(pct, cutoff):
-        """Core MIX 颜色：以 cutoff（总 Core MIX）为分界，> cutoff 用深绿+加粗白色文字（明显突出），
-        < cutoff 用浅绿+普通深色文字；None 用灰底灰字。"""
+        """≥ cutoff 绿渐变（值越大越深，白字加粗）；< cutoff 橙渐变（值越小越深，黑字）。"""
         if pct is None or pd.isna(pct):
             return ("#f5f5f5", "#999999", False)
         p = max(0.0, min(100.0, float(pct)))
-        is_above = p > cutoff
-        if is_above:
-            # 深绿系 + 加粗白色：更醒目地表示超过汇总
-            t = (p - cutoff) / max(100.0 - cutoff, 1.0) if cutoff < 100 else p / 100.0
-            t = max(0.0, min(1.0, t))
-            # 起点偏深绿 #1a6b1a，饱和度随 t 略增
-            r = int(26 + (1 - t) * 10)
-            g = int(107 + (1 - t) * 15)
-            b = int(26 + (1 - t) * 10)
-            bg = f"#{r:02x}{g:02x}{b:02x}"
-            fg = "#ffffff"
-            return (bg, fg, True)
-        else:
-            # 浅绿系 + 普通深色文字
-            t = p / max(cutoff, 1.0) if cutoff > 0 else p / 100.0
-            t = max(0.0, min(1.0, t))
-            r = int(245 - t * 35)
-            g = int(250 - t * 20)
-            b = int(245 - t * 35)
-            bg = f"#{r:02x}{g:02x}{b:02x}"
-            fg = "#1a1a1a"
-            return (bg, fg, False)
+        if p >= cutoff:
+            t = (p - cutoff) / _max_excess if _max_excess > 0 else 0.0
+            return (_blend((200, 230, 201), (27, 94, 32), t), "#ffffff", True)
+        t = (cutoff - p) / _max_deficit if _max_deficit > 0 else 0.0
+        return (_blend((255, 224, 178), (230, 81, 0), t), "#1a1a1a", False)
 
     def _fmt_pct(pct):
         return "—" if pct is None or pd.isna(pct) else f"{int(round(pct))}%"
 
-    # 汇总行（置顶）：汇总列=总体，横向列=各横向维度自身 mix
-    # 汇总行首列显示"汇总"标签（与汇总列标题对应）
+    # 汇总行（置顶）：汇总列=总体（ref-cell 样式），横向列=各横向维度自身 mix
     summary_cells = ['<td class="dim-label summary-label-cell"><b>汇总</b></td>']
-    bg, fg, bold = _mix_color(total_mix, total_mix)
-    fw = "bold" if bold else "normal"
-    summary_cells.append(f'<td class="mix-cell mix-summary" style="background:{bg};color:{fg};font-weight:{fw}"><b>{_fmt_pct(total_mix)}</b></td>')
+    summary_cells.append(f'<td class="mix-cell mix-summary ref-cell"><b>{_fmt_pct(total_mix)}</b></td>')
     for _, h in h_grp.iterrows():
         bg, fg, bold = _mix_color(h["mix"], total_mix)
         fw = "bold" if bold else "normal"
@@ -1595,11 +1542,8 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     for i, row in v_grp.iterrows():
         v_val = row[vertical_dim]
         cells = [f'<td class="dim-label">{_esc_html(str(v_val))}</td>']
-        # 汇总列 = 纵向维度自身 mix
-        bg, fg, bold = _mix_color(row["mix"], total_mix)
-        fw = "bold" if bold else "normal"
-        cls = "mix-cell mix-summary mix-above" if bold else "mix-cell mix-summary mix-below"
-        cells.append(f'<td class="{cls}" style="background:{bg};color:{fg};font-weight:{fw}">{_fmt_pct(row["mix"])}</td>')
+        # 汇总列 = 纵向维度自身 mix（与 by Week 当前 Week TTL Core MIX 值同款展示：白底绿字加粗放大）
+        cells.append(f'<td class="mix-cell mix-summary ref-cell"><b>{_fmt_pct(row["mix"])}</b></td>')
         for _, h in h_grp.iterrows():
             h_val = h[horizontal_dim]
             mix = cross_idx.get((v_val, h_val), None)
@@ -1654,6 +1598,9 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     .theme-dark .core-mix-table tbody tr.summary-row td { background: #0e1117; }
     .theme-dark .core-mix-table tbody tr.summary-row td.dim-label { background: #1b1d26; }
     .theme-dark .core-mix-table .h-mix { color: #d0d0d0; }
+    /* 汇总列值（与 by Week 当前 Week TTL Core MIX 值同款）：白底绿字加粗放大+绿色描边，不随主题变化 */
+    .core-mix-table td.mix-summary.ref-cell { background: #ffffff; color: #009a44; font-weight: 700; font-size: 15px; box-shadow: inset 0 0 0 1px #00b050; }
+    .theme-dark .core-mix-table td.mix-summary.ref-cell { background: #ffffff; color: #009a44; }
     </style>
     """
 
