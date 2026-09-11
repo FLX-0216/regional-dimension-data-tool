@@ -99,6 +99,8 @@ _THEME_RUNTIME_JS = """
     detect();
     setTimeout(detect, 60);
     setTimeout(detect, 200);
+    // 持续轮询：用户在 light/dark 间切换时（Streamlit 复用 iframe 不重载组件），也能跟随切换
+    setInterval(detect, 800);
 })();
 </script>
 """
@@ -1159,7 +1161,7 @@ def _render_fcst_modules(fy, cur_cycle, cmp_cycle, scope, sub_region):
                 "<b style='font-size:0.85rem;'>by Week Core MIX</b></div>",
                 unsafe_allow_html=True,
             )
-            _render_core_mix_by_week(fy, scope, sub_region)
+            _render_core_mix_by_week(fy, scope, sub_region, cur_cycle)
 
 
 def _render_fcst_trend(fy, scope, sub_region):
@@ -1657,14 +1659,15 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     components.html(html, height=90 + (len(v_grp) + 2) * 26, scrolling=True)
 
 
-def _render_core_mix_by_week(fy, scope, sub_region):
+def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
     """by Week Core MIX 分析（跟随 Core MIX 棋盘格的纵向维度）：
     - 第一列：上方纵向维度所选维度的值（如 大区/区域/产线名称...）
     - 列：各 Week（FCST Cycle）的 Core MIX%
     - 最后一列：by week Trend 折线 sparkline（类似 by Week 趋势表的结构）
     - 首行：汇总（整体每周 Core MIX + trend）
     - 数据范围：所选 FY + scope/sub_region + 全部周（不按 cur_cycle 过滤）
-    - 配色：> 总体 Core MIX 深绿加粗白字，≤ 浅绿深色字
+    - 配色：以【当前 FCST Cycle 列的值】为基准——大于基准的单元格按绿色由深到浅渐变
+      （越高于基准越深），小于基准的按橙色由浅到深渐变（越低于基准越深）。
     """
     import re as _re
     import streamlit.components.v1 as components
@@ -1688,6 +1691,7 @@ def _render_core_mix_by_week(fy, scope, sub_region):
 
     st.markdown(
         f"<small style='color:#666;'>按 FCST Cycle 展示每个 Week 在【<b>{_esc_html(vertical_dim)}</b>】维度下的 Core MIX%；"
+        "配色以【当前 Cycle 列的值】为基准：大于基准=绿色渐变（越深），小于基准=橙色渐变（越深）；"
         "首行汇总=整体每周 Core MIX；最后一列=各维度值的 by week Trend。</small>",
         unsafe_allow_html=True,
     )
@@ -1746,13 +1750,56 @@ def _render_core_mix_by_week(fy, scope, sub_region):
     def _fmt_pct(x):
         return "—" if x is None or pd.isna(x) else f"{int(round(x))}%"
 
-    def _mix_bg_fg(pct):
+    # —— 两阶段：先计算全部行数据与配色基准，再统一渲染 ——
+    # 基准 = 该行在【当前 FCST Cycle】列的值；行内无当前 Cycle 值时回退到汇总行的当前 Cycle 值
+    summary_vals = [week_mix_idx.get(w) for w in weeks]
+    summary_ref = week_mix_idx.get(cur_cycle) if cur_cycle else None
+
+    row_data = []  # (label, vals, ref)
+    for _, r in v_grp.iterrows():
+        v_val = r[vertical_dim]
+        vals = [cross_idx.get((v_val, w)) for w in weeks]
+        ref = cross_idx.get((v_val, cur_cycle)) if cur_cycle else None
+        if ref is None or pd.isna(ref):
+            ref = summary_ref
+        row_data.append((v_val, vals, ref))
+
+    # 全局渐变刻度：所有单元格相对各自基准的最大偏离幅度
+    excess, deficit = [], []
+    for vals, ref0 in [(summary_vals, summary_ref)] + [(rd[1], rd[2]) for rd in row_data]:
+        if ref0 is None or pd.isna(ref0):
+            continue
+        for v in vals:
+            if v is None or pd.isna(v):
+                continue
+            if v > ref0:
+                excess.append(v - ref0)
+            elif v < ref0:
+                deficit.append(ref0 - v)
+    max_excess = max(excess) if excess else 0.0
+    max_deficit = max(deficit) if deficit else 0.0
+
+    def _blend(c1, c2, t):
+        return "#%02x%02x%02x" % tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
+
+    def _mix_bg_fg(pct, ref):
+        """配色：> 基准绿渐变（越高于基准越深），< 基准橙渐变（越低于基准越深）；
+        等于基准或无基准不着色。"""
         if pct is None or pd.isna(pct):
             return ("transparent", "#999999", False)
-        is_above = total_mix is not None and pct > total_mix
-        if is_above:
-            return ("#1a6b1a", "#ffffff", True)
-        return ("#e8f5e8", "#1a1a1a", False)
+        if ref is None or pd.isna(ref):
+            return ("transparent", "inherit", False)
+        if pct > ref:
+            t = (pct - ref) / max_excess if max_excess > 0 else 1.0
+            bg = _blend((200, 230, 201), (27, 94, 32), t)   # 浅绿 → 深绿
+            fg = "#ffffff" if t > 0.45 else "#1a1a1a"
+            return (bg, fg, True)
+        if pct < ref:
+            t = (ref - pct) / max_deficit if max_deficit > 0 else 1.0
+            bg = _blend((255, 224, 178), (230, 81, 0), t)   # 浅橙 → 深橙
+            fg = "#ffffff" if t > 0.55 else "#1a1a1a"
+            return (bg, fg, False)
+        return ("transparent", "inherit", False)
 
     def _spark_line(vals, color):
         """按周走势折线 sparkline（与 by Week 趋势表同款风格）。"""
@@ -1788,39 +1835,30 @@ def _render_core_mix_by_week(fy, scope, sub_region):
 
     rows_html = []
 
-    def _build_row(label, get_mix_fn, is_summary=False, is_current_dim=False):
-        vals = [get_mix_fn(w) for w in weeks]
+    def _render_row(label, vals, ref, is_summary=False):
         cells = [
-            f'<td class="lbl{" dim-current" if is_current_dim else ""}">'
-            f'{"<b>" + _esc_html(str(label)) + "</b>" if is_summary or is_current_dim else _esc_html(str(label))}</td>'
+            '<td class="lbl">'
+            + ("<b>" + _esc_html(str(label)) + "</b>" if is_summary else _esc_html(str(label)))
+            + "</td>"
         ]
         for v in vals:
-            bg, fg, bold = _mix_bg_fg(v)
+            bg, fg, bold = _mix_bg_fg(v, ref)
             fw = "bold" if bold else "normal"
             cells.append(
                 f'<td class="num" style="background:{bg};color:{fg};font-weight:{fw};">{_fmt_pct(v)}</td>'
             )
-        row_overall = _mix(
-            sum(1 for v in vals if v is not None and not pd.isna(v) and v > 0),
-            sum(1 for v in vals if v is not None and not pd.isna(v) and v <= 0),
-        )
-        # trend 颜色：该行整体 mix > 总体 → 深绿，否则灰
-        row_mix = None
-        spark_color = "#888888"
-        if is_summary:
-            spark_color = "#31333F"
+        spark_color = "#31333F" if is_summary else "#888888"
         rows_html.append(
             '<tr class="' + ("summary-row" if is_summary else "data-row") + '">'
             + "".join(cells)
             + f'<td class="num trendcol">{_spark_line(vals, spark_color)}</td></tr>'
         )
 
-    # 汇总行（置顶）
-    _build_row("汇总", lambda w: week_mix_idx.get(w), is_summary=True)
-    # 各维度值行
-    for _, r in v_grp.iterrows():
-        v_val = r[vertical_dim]
-        _build_row(v_val, lambda w, vv=v_val: cross_idx.get((vv, w)))
+    # 汇总行（置顶，基准=当前 Cycle 的整体 Core MIX）
+    _render_row("汇总", summary_vals, summary_ref, is_summary=True)
+    # 各维度值行（基准=各自当前 Cycle 值）
+    for label, vals, ref in row_data:
+        _render_row(label, vals, ref)
 
     n_week_cols = len(weeks)
     colgroup = (
@@ -2193,15 +2231,15 @@ def main():
     if "run_export" not in st.session_state:
         st.session_state.run_export = False
 
-    # 顶部 fixed 区：主视图切换 + FCST 分析模块 tab + 数据版本/刷新 + FCST 维度/范围选择
+    # 顶部 fixed 区：主视图切换（贴顶）+ FCST 分析模块 tab（第二行）+ FCST 维度/范围选择
     # 真正钉在视口最顶端（position: fixed），高度随内容自适应但保持紧凑。
     with st.container(border=True):
         st.markdown(
             '<div id="main-top-marker" style="display:none;"></div>',
             unsafe_allow_html=True,
         )
-        # Row 1：主视图切换 | FCST 分析模块 tab | 刷新
-        _r1c1, _r1c2, _r1c3 = st.columns([3, 6, 1])
+        # Row 1：主视图切换 | 刷新（贴容器顶端）
+        _r1c1, _r1c2 = st.columns([11, 1])
         with _r1c1:
             main_view = st.radio(
                 "视图",
@@ -2212,16 +2250,6 @@ def main():
                 index=0,
             )
         with _r1c2:
-            fcst_module = None
-            if main_view == "FCST 分析":
-                fcst_module = st.radio(
-                    "FCST模块",
-                    ["差异分析", "FCST by Week 趋势", "Core MIX 分析"],
-                    horizontal=True,
-                    key="fcst_module",
-                    label_visibility="collapsed",
-                )
-        with _r1c3:
             if st.button(
                 "🔄",
                 key="fcst_refresh",
@@ -2231,10 +2259,17 @@ def main():
                 _invalidate_fcst_cache()
                 st.rerun()
 
-        # Row 2：FCST 控件（5 个 selectbox 横向）+ 数据版本；或导出提示
         if main_view == "FCST 分析":
+            # Row 2：FCST 分析三个模块 tab（放在 FCST 分析下方）
+            fcst_module = st.radio(
+                "FCST模块",
+                ["差异分析", "FCST by Week 趋势", "Core MIX 分析"],
+                horizontal=True,
+                key="fcst_module",
+                label_visibility="collapsed",
+            )
+            # Row 3：FCST 控件（5 个 selectbox 横向）+ 数据版本
             fcst_vals = _render_fcst_controls_inline()
-            # 数据版本放在第二行末尾，紧凑提示
             try:
                 _fcst_mt = _bucket_mtime("FCST")
                 if _fcst_mt:
