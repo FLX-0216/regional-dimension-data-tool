@@ -1205,10 +1205,17 @@ def _render_fcst_trend(fy, scope, sub_region):
         # 注意：不再截断前 15 名，保证满足阈值的大客户完整列出
         return big
 
-    c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
+    def get_all_customers(pos_df):
+        """全部客户（按总金额降序），供模糊搜索使用。"""
+        pos_df = pos_df[pos_df["客户名称"].astype(str).str.strip() != ""]
+        if pos_df.empty:
+            return []
+        return pos_df.groupby("客户名称")["业绩考核USDK"].sum().sort_values(ascending=False).index.tolist()
+
+    c1, c2, c3, c4, c5 = st.columns([2.2, 1.3, 1.3, 2.4, 0.9])
     with c1:
         st.markdown(
-            "<small>每行展示各 Week 金额及趋势；用右侧开关控制 Solutions / Services 大客户明细。</small>",
+            "<small>每行展示各 Week 金额及趋势；开关控制大客户明细，搜索框可模糊搜索客户。</small>",
             unsafe_allow_html=True,
         )
     with c2:
@@ -1216,6 +1223,15 @@ def _render_fcst_trend(fy, scope, sub_region):
     with c3:
         show_services_cust = st.toggle("Services 客户", value=False, key="trend_show_pos_cust")
     with c4:
+        # 模糊搜索：输入后展示名称匹配的客户 trend（不受开关与阈值限制）
+        search_txt = st.text_input(
+            "搜索客户",
+            value="",
+            key="trend_cust_search",
+            label_visibility="collapsed",
+            placeholder="搜索客户…",
+        )
+    with c5:
         # 阈值：数据源单位为 USDK，1000K 对应数值 1000
         threshold = st.number_input(
             "大客户阈值",
@@ -1225,6 +1241,7 @@ def _render_fcst_trend(fy, scope, sub_region):
             key="fcst_cust_threshold",
             label_visibility="collapsed",
         )
+    _q = (search_txt or "").strip().lower()
 
     def sparkline(vals, color):
         if len(vals) == 0:
@@ -1278,9 +1295,14 @@ def _render_fcst_trend(fy, scope, sub_region):
             f'{make_cells(pos_vals)}'
             f'<td class="trend">{sparkline(pos_vals, color)}</td></tr>'
         )
-        if not expanded:
+        if not expanded and not _q:
             return
-        for i, cust in enumerate(get_big_customers(pos_df, threshold)):
+        if _q:
+            # 模糊搜索模式：展示名称匹配的全部客户（不受开关与阈值限制）
+            custs = [c for c in get_all_customers(pos_df) if _q in str(c).lower()]
+        else:
+            custs = get_big_customers(pos_df, threshold)
+        for i, cust in enumerate(custs):
             vals = weekly_series(pos_df[pos_df["客户名称"] == cust])
             cust_color = cust_colors[i % len(cust_colors)]
             rows_html.append(
@@ -1419,8 +1441,8 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
 
     st.markdown(
         "<small>Core MIX = Core 金额 ÷ (Core + Memoline) 金额；选择纵向/横向维度，生成可交互棋盘格。"
-        "配色以【总体 Core MIX】为基准：≥基准=绿色渐变（值越大越深，白字加粗），&lt;基准=橙色渐变"
-        "（值越小越深，黑字）；汇总列白底绿字加粗放大。</small>",
+        "配色以【所选 Week 的 TTL Core MIX 值】为基准：≥基准=绿色渐变（值越大越深，白字加粗），"
+        "&lt;基准=橙色渐变（值越小越深，黑字）；汇总列白底绿字加粗放大。</small>",
         unsafe_allow_html=True,
     )
 
@@ -1436,9 +1458,9 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
 
     # 读取当前选择；若两边相同则自动切换，避免 groupby 重复列报错
     v_default = st.session_state.get("core_mix_vertical", "服务大区")
-    h_default = st.session_state.get("core_mix_horizontal", "产线名称")
+    h_default = st.session_state.get("core_mix_horizontal", "纯产线大类")
     if h_default == v_default:
-        h_default = next((k for k in DIM_KEYS if k != v_default), "产线名称")
+        h_default = next((k for k in DIM_KEYS if k != v_default), "纯产线大类")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1474,6 +1496,15 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     total_memo = float(valid["_memo"].sum())
     total_mix = _mix(total_core, total_memo) or 0.0
 
+    # 配色基准 = 所选 Week 的 TTL Core MIX 值（横向纵向都取"汇总"的当前 Cycle 值）
+    _ref = total_mix
+    if cur_cycle:
+        _wk = valid[valid["FCST Cycle"] == cur_cycle]
+        if not _wk.empty:
+            _r = _mix(float(_wk["_core"].sum()), float(_wk["_memo"].sum()))
+            if _r is not None:
+                _ref = _r
+
     # 横向维度列（按自身 Core MIX 降序）
     h_grp = valid.groupby(horizontal_dim, dropna=False).agg(_core=("_core", "sum"), _memo=("_memo", "sum")).reset_index()
     h_grp["mix"] = h_grp.apply(lambda r: _mix(r["_core"], r["_memo"]), axis=1)
@@ -1503,8 +1534,8 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     _pool = [v for v in cross_idx.values() if v is not None and not pd.isna(v)]
     _pool += [v for v in v_grp["mix"].tolist() if v is not None and not pd.isna(v)]
     _pool += [v for v in h_grp["mix"].tolist() if v is not None and not pd.isna(v)]
-    _max_excess = max([v - total_mix for v in _pool if v >= total_mix] or [0.0])
-    _max_deficit = max([total_mix - v for v in _pool if v < total_mix] or [0.0])
+    _max_excess = max([v - _ref for v in _pool if v >= _ref] or [0.0])
+    _max_deficit = max([_ref - v for v in _pool if v < _ref] or [0.0])
 
     def _blend(c1, c2, t):
         return "#%02x%02x%02x" % tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
@@ -1527,15 +1558,15 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     summary_cells = ['<td class="dim-label summary-label-cell"><b>汇总</b></td>']
     summary_cells.append(f'<td class="mix-cell mix-summary ref-cell"><b>{_fmt_pct(total_mix)}</b></td>')
     for _, h in h_grp.iterrows():
-        bg, fg, bold = _mix_color(h["mix"], total_mix)
+        bg, fg, bold = _mix_color(h["mix"], _ref)
         fw = "bold" if bold else "normal"
         summary_cells.append(f'<td class="mix-cell" style="background:{bg};color:{fg};font-weight:{fw}">{_fmt_pct(h["mix"])}</td>')
 
     row_html_list = []
-    # 绿色虚线分隔位置：最后一个 mix > total_mix 的纵向维度之后
+    # 绿色虚线分隔位置：最后一个 mix > _ref（所选 Week TTL Core MIX）的纵向维度之后
     cutoff_idx = -1
     for i, row in v_grp.iterrows():
-        if (row["mix"] or 0) > total_mix:
+        if (row["mix"] or 0) > _ref:
             cutoff_idx = i
 
     n_cols = len(h_grp) + 2
@@ -1547,7 +1578,7 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
         for _, h in h_grp.iterrows():
             h_val = h[horizontal_dim]
             mix = cross_idx.get((v_val, h_val), None)
-            bg, fg, bold = _mix_color(mix, total_mix)
+            bg, fg, bold = _mix_color(mix, _ref)
             fw = "bold" if bold else "normal"
             cls = "mix-cell mix-above" if bold else "mix-cell mix-below"
             cells.append(f'<td class="{cls}" style="background:{bg};color:{fg};font-weight:{fw}">{_fmt_pct(mix)}</td>')
@@ -2398,9 +2429,10 @@ def main():
             padding: 0 4px !important;
         }
         [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stSelectbox .react-aria-ComboBox input {
-            min-height: 16px !important;
-            height: 16px !important;
-            font-size: 0.55rem !important;
+            min-height: 18px !important;
+            height: 18px !important;
+            font-size: 0.75rem !important;
+            font-weight: 600 !important;
             padding: 0 4px !important;
         }
         [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stSelectbox .react-aria-ComboBox button {
@@ -2462,16 +2494,21 @@ def main():
                 /* --- selectbox：Streamlit 1.6x 用 React-Aria ComboBox 结构 --- */
                 '.fcst-pin-bar .stSelectbox { margin: 0 !important; padding: 0 !important; }',
                 '.fcst-pin-bar .stSelectbox > div { margin: 0 !important; min-height: 0 !important; }',
-                '.fcst-pin-bar .stSelectbox div.react-aria-ComboBox { min-height: 18px !important; height: 18px !important; margin: 0 !important; }',
-                '.fcst-pin-bar .stSelectbox .react-aria-ComboBox > div { min-height: 18px !important; height: 18px !important; padding: 0 4px !important; }',
-                '.fcst-pin-bar .stSelectbox .react-aria-ComboBox input { min-height: 16px !important; height: 16px !important; font-size: 10px !important; padding: 0 4px !important; }',
-                '.fcst-pin-bar .stSelectbox .react-aria-ComboBox button { min-height: 16px !important; height: 16px !important; width: 16px !important; padding: 0 !important; }',
-                '.fcst-pin-bar .stSelectbox .react-aria-ComboBox button svg { width: 11px !important; height: 11px !important; }',
+                '.fcst-pin-bar .stSelectbox div.react-aria-ComboBox { min-height: 20px !important; height: 20px !important; margin: 0 !important; }',
+                '.fcst-pin-bar .stSelectbox .react-aria-ComboBox > div { min-height: 20px !important; height: 20px !important; padding: 0 4px !important; }',
+                '.fcst-pin-bar .stSelectbox .react-aria-ComboBox input { min-height: 18px !important; height: 18px !important; font-size: 12px !important; font-weight: 600 !important; padding: 0 4px !important; }',
+                '.fcst-pin-bar .stSelectbox .react-aria-ComboBox button { min-height: 18px !important; height: 18px !important; width: 18px !important; padding: 0 !important; }',
+                '.fcst-pin-bar .stSelectbox .react-aria-ComboBox button svg { width: 12px !important; height: 12px !important; }',
                 /* --- radio 紧凑 --- */
                 '.fcst-pin-bar .stRadio { margin: 0 !important; padding: 0 !important; }',
                 '.fcst-pin-bar .stRadio > div { margin: 0 !important; min-height: 0 !important; }',
                 '.fcst-pin-bar .stRadio [role="radiogroup"] { gap: 2px !important; margin: 0 !important; min-height: 0 !important; }',
                 '.fcst-pin-bar .stRadio [role="radiogroup"] label { min-height: 17px !important; height: 17px !important; font-size: 10px !important; padding: 0 4px !important; gap: 2px !important; margin: 0 !important; }',
+                /* --- 主视图 tab 缩小 2 号、FCST 模块 tab 缩小 4 号（JS 给 radiogroup 加类） --- */
+                '.fcst-pin-bar .stRadio .main-view-radio label, .fcst-pin-bar .stRadio .main-view-radio label * { font-size: 8px !important; }',
+                '.fcst-pin-bar .stRadio .module-radio label, .fcst-pin-bar .stRadio .module-radio label * { font-size: 6px !important; }',
+                /* --- 页面大标题（注入 stHeader 空白处） --- */
+                '#app-title-bar { position: absolute; left: 48px; top: 50%; transform: translateY(-50%); font-size: 18px; font-weight: 700; letter-spacing: 1px; pointer-events: none; white-space: nowrap; z-index: 1; }',
                 '.fcst-pin-bar .stAlert { padding: 1px 4px !important; font-size: 10px !important; margin: 0 !important; min-height: 0 !important; }'
             ].join('\\n');
             doc.head.appendChild(st);
@@ -2488,16 +2525,46 @@ def main():
             var app = doc.querySelector('.stApp') || doc.body;
             return app ? getComputedStyle(app).backgroundColor : '';
         }
+        function isDarkBg(doc) {
+            var bg = themeBg(doc) || '';
+            var m = bg.match(/[\\d.]+/g);
+            if (!m || m.length < 3) return false;
+            return (0.299 * parseFloat(m[0]) + 0.587 * parseFloat(m[1]) + 0.114 * parseFloat(m[2])) < 128;
+        }
+        function ensureTitle(doc, dark) {
+            var hd = doc.querySelector('[data-testid="stHeader"]');
+            if (!hd) return;
+            var t = doc.getElementById('app-title-bar');
+            if (!t) {
+                t = doc.createElement('div');
+                t.id = 'app-title-bar';
+                t.textContent = '政企方案服务区域数据分析';
+                hd.appendChild(t);
+            }
+            t.style.color = dark ? '#f5f5f5' : '#31333F';
+        }
+        function tagRadios(doc) {
+            // 主视图 radio（含"明细 / 透视导出"）缩小 2 号；FCST 模块 radio（含"差异分析"）缩小 4 号
+            doc.querySelectorAll('.fcst-pin-bar .stRadio [role="radiogroup"]').forEach(function(rg) {
+                var txt = rg.textContent || '';
+                rg.classList.remove('main-view-radio', 'module-radio');
+                if (txt.indexOf('明细 / 透视导出') >= 0) rg.classList.add('main-view-radio');
+                else if (txt.indexOf('差异分析') >= 0) rg.classList.add('module-radio');
+            });
+        }
         function apply() {
             try {
                 var doc = window.parent.document;
                 ensureStyle(doc);
+                var dark = isDarkBg(doc);
+                ensureTitle(doc, dark);
                 var marker = doc.getElementById('main-top-marker');
                 if (!marker) return;
                 var el = marker.closest('[data-testid="stLayoutWrapper"]')
                       || marker.closest('[data-testid="stVerticalBlock"]');
                 if (!el) return;
                 if (!el.classList.contains('fcst-pin-bar')) el.classList.add('fcst-pin-bar');
+                tagRadios(doc);
                 var hh = headerH(doc);
                 var sw = sidebarW(doc);
                 el.style.setProperty('top', hh + 'px', 'important');
