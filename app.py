@@ -1631,8 +1631,8 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     .core-mix-table thead th { position: sticky; top: 0; background: #f7f7f8; font-weight: 600; z-index: 30; }
     .core-mix-table thead th.dim-label { z-index: 40; }
     .core-mix-table thead th.mix-summary { z-index: 40; }
-    /* 汇总行吸顶（紧跟表头） */
-    .core-mix-table tbody tr.summary-row td { position: sticky; top: 40px; background: #ffffff; z-index: 25; }
+    /* 汇总行吸顶（紧跟表头；表头高度因长名称换行不定，由 JS 实测写入 --cm-head-h） */
+    .core-mix-table tbody tr.summary-row td { position: sticky; top: var(--cm-head-h, 40px); background: #ffffff; z-index: 25; }
     .core-mix-table tbody tr.summary-row td.dim-label { background: #fafafa; z-index: 35; }
     .core-mix-table tbody tr.summary-row td.mix-summary { background: #ffffff; z-index: 35; }
     /* 首列（纵向维度）+ 第二列（汇总 Core MIX）左吸 */
@@ -1666,6 +1666,24 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
         + "".join(row_html_list)
         + "</tbody></table></div>"
         + _THEME_RUNTIME_JS
+        + """
+    <script>
+    (function() {
+        // 实测表头高度写入 CSS 变量，保证汇总行吸顶紧跟表头（长名称换行时也正确）
+        function syncHead() {
+            var th = document.querySelector('.core-mix-table thead');
+            if (!th) return;
+            var h = th.getBoundingClientRect().height;
+            if (h > 0) document.documentElement.style.setProperty('--cm-head-h', h + 'px');
+        }
+        syncHead();
+        setTimeout(syncHead, 60);
+        setTimeout(syncHead, 200);
+        setTimeout(syncHead, 400);
+        window.addEventListener('resize', syncHead);
+    })();
+    </script>
+    """
     )
 
     # 限高 + 内部滚动（表头与汇总行已 sticky 固定），避免 SPL/产线等长列表把页面撑得过长
@@ -1708,7 +1726,7 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
 
     st.markdown(
         f"<small style='color:#666;'>按 FCST Cycle 展示每个 Week 在【<b>{_esc_html(vertical_dim)}</b>】维度下的 Core MIX%；"
-        "配色以【汇总行当前 Cycle 值】为基准（该单元格绿字加粗、背景随主题反色）："
+        "配色以【汇总行当前 Cycle 值】为基准（该单元格白底绿字加粗放大，列标题蓝色高亮）："
         "≥基准=绿色渐变（值越大越深，白字加粗），&lt;基准=橙色渐变（值越小越深，黑字）；"
         "最后一列=各维度值的 by week Trend。</small>",
         unsafe_allow_html=True,
@@ -1841,9 +1859,12 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
             f'stroke-linecap="round" stroke-linejoin="round"/>{circles}</svg>'
         )
 
-    # 表头：维度名 | Week... | Trend
+    # 表头：维度名 | Week...（当前 Cycle 列标题高亮） | Trend
     header_cells = [f'<th class="lbl">{_esc_html(vertical_dim)}</th>']
-    header_cells += [f'<th class="num">{_esc_html(w)}</th>' for w in weeks]
+    header_cells += [
+        f'<th class="num{" cur-head" if w == cur_cycle else ""}">{_esc_html(w)}</th>'
+        for w in weeks
+    ]
     header_cells.append('<th class="num trendcol">Trend</th>')
 
     rows_html = []
@@ -1910,10 +1931,11 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
     .theme-dark .cmbw-table td {{ border-bottom-color: #36363f; border-right-color: #36363f; }}
     .theme-dark .cmbw-table td.lbl {{ background: #1b1d26; color: #f5f5f5; }}
     .theme-dark .cmbw-table tbody tr.summary-row td {{ background: #1f212b; }}
-    /* 基准单元格（汇总行当前 Cycle）：绿字加粗加大字号；背景 dark=白 / light=黑，随主题切换 */
-    .cmbw-table td.ref-cell {{ color: #00b050; font-weight: 700; font-size: 13px; }}
-    .theme-light .cmbw-table td.ref-cell {{ background: #000000; }}
-    .theme-dark .cmbw-table td.ref-cell {{ background: #ffffff; }}
+    /* 当前 Cycle 列标题高亮（与其它 week 标题区分） */
+    .cmbw-table thead th.cur-head {{ background: #cfe0ff; color: #1a1a1a; }}
+    .theme-dark .cmbw-table thead th.cur-head {{ background: #1f3b66; color: #ffffff; }}
+    /* 基准单元格（汇总行当前 Cycle）：白底绿字加粗放大，绿色描边增强区分（不随主题变化） */
+    .cmbw-table td.ref-cell {{ color: #009a44; font-weight: 700; font-size: 15px; background: #ffffff; box-shadow: inset 0 0 0 1px #00b050; }}
     /* dark 主题下汇总行 sparkline 由深灰改为浅色，避免看不清 */
     .theme-dark .cmbw-table tr.summary-row .cmbw-spark polyline {{ stroke: #f5f5f5; }}
     .theme-dark .cmbw-table tr.summary-row .cmbw-spark circle {{ fill: #f5f5f5; }}
