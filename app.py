@@ -1441,8 +1441,8 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
 
     st.markdown(
         "<small>Core MIX = Core 金额 ÷ (Core + Memoline) 金额；选择纵向/横向维度，生成可交互棋盘格。"
-        "配色以【所选 Week 的 TTL Core MIX 值】为基准：≥基准=绿色渐变（值越大越深，白字加粗），"
-        "&lt;基准=橙色渐变（值越小越深，黑字）；汇总列白底绿字加粗放大。</small>",
+        "配色基准=所选 Week 的 TTL Core MIX 值（横向纵向汇总交叉处，白底绿字标出）："
+        "≥基准=绿色渐变（值越大越深，白字加粗），&lt;基准=橙色渐变（值越小越深，黑字）。</small>",
         unsafe_allow_html=True,
     )
 
@@ -1573,8 +1573,13 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     for i, row in v_grp.iterrows():
         v_val = row[vertical_dim]
         cells = [f'<td class="dim-label">{_esc_html(str(v_val))}</td>']
-        # 汇总列 = 纵向维度自身 mix（与 by Week 当前 Week TTL Core MIX 值同款展示：白底绿字加粗放大）
-        cells.append(f'<td class="mix-cell mix-summary ref-cell"><b>{_fmt_pct(row["mix"])}</b></td>')
+        # 汇总列 = 纵向维度自身 mix，同样与基准（所选 Week TTL Core MIX）做颜色区分；
+        # 基准单元格只有汇总行的那个（白底绿字 ref-cell 样式）
+        bg, fg, bold = _mix_color(row["mix"], _ref)
+        fw = "bold" if bold else "normal"
+        cells.append(
+            f'<td class="mix-cell mix-summary" style="background:{bg};color:{fg};font-weight:{fw}"><b>{_fmt_pct(row["mix"])}</b></td>'
+        )
         for _, h in h_grp.iterrows():
             h_val = h[horizontal_dim]
             mix = cross_idx.get((v_val, h_val), None)
@@ -2504,9 +2509,9 @@ def main():
                 '.fcst-pin-bar .stRadio > div { margin: 0 !important; min-height: 0 !important; }',
                 '.fcst-pin-bar .stRadio [role="radiogroup"] { gap: 2px !important; margin: 0 !important; min-height: 0 !important; }',
                 '.fcst-pin-bar .stRadio [role="radiogroup"] label { min-height: 17px !important; height: 17px !important; font-size: 10px !important; padding: 0 4px !important; gap: 2px !important; margin: 0 !important; }',
-                /* --- 主视图 tab 缩小 2 号、FCST 模块 tab 缩小 4 号（JS 给 radiogroup 加类） --- */
-                '.fcst-pin-bar .stRadio .main-view-radio label, .fcst-pin-bar .stRadio .main-view-radio label * { font-size: 8px !important; }',
-                '.fcst-pin-bar .stRadio .module-radio label, .fcst-pin-bar .stRadio .module-radio label * { font-size: 6px !important; }',
+                /* --- 主视图 tab、FCST 模块 tab 字号分级（JS 给 radiogroup 加类） --- */
+                '.fcst-pin-bar .stRadio .main-view-radio label, .fcst-pin-bar .stRadio .main-view-radio label * { font-size: 9px !important; }',
+                '.fcst-pin-bar .stRadio .module-radio label, .fcst-pin-bar .stRadio .module-radio label * { font-size: 8px !important; }',
                 /* --- 页面大标题（注入 stHeader 空白处） --- */
                 '#app-title-bar { position: absolute; left: 48px; top: 50%; transform: translateY(-50%); font-size: 18px; font-weight: 700; letter-spacing: 1px; pointer-events: none; white-space: nowrap; z-index: 1; }',
                 '.fcst-pin-bar .stAlert { padding: 1px 4px !important; font-size: 10px !important; margin: 0 !important; min-height: 0 !important; }'
