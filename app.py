@@ -1065,51 +1065,53 @@ def _render_fcst_controls_inline():
 
 
 def _render_fcst_modules(fy, cur_cycle, cmp_cycle, scope, sub_region):
-    """FCST 分析三大模块：差异分析、by Week 趋势对比、Core MIX 分析（各自独立容器）。"""
-    # 用 session_state 缓存上次计算结果，左侧导出设置变化时不重新算 FCST
-    # 注意：cache_key 必须包含三个数据桶的 mtime，否则上传/清理数据后
-    # session 缓存仍会返回旧的（=0 的）结果，表现为"选了 Week10 还是 0"。
-    cache_key = (
-        f"{fy}|{cur_cycle}|{cmp_cycle}|{scope}|{sub_region}"
-        f"|{_mapping_mtime()}"
-        f"|{_bucket_mtime('FCST')}|{_bucket_mtime('DG&Quota')}|{_bucket_mtime('历史Union')}"
-    )
-    if st.session_state.get("fcst_cache_key") != cache_key:
-        with st.spinner("正在计算 FCST 分析…"):
-            res = compute_fcst(fy, cur_cycle, cmp_cycle, scope, sub_region)
-        st.session_state["fcst_result"] = res
-        st.session_state["fcst_cache_key"] = cache_key
-    else:
-        res = st.session_state["fcst_result"]
+    """FCST 分析三大模块：差异分析、by Week 趋势对比、Core MIX 分析。
+    通过顶部固定容器中的 fcst_module tab 切换，仅渲染当前选中的模块，
+    避免模块标题随滚动被覆盖，也避免展开客户明细后与其他模块位置重叠。
+    """
+    fcst_module = st.session_state.get("fcst_module", "差异分析")
 
     st.caption(
-        f"财年财季 {res['fy']} ｜ 当前 {res['cur_cycle']} vs 对比 {res['cmp_cycle']} ｜ "
-        f"范围 {res['scope']}{(' / ' + res['sub_region']) if res['sub_region'] else ''}"
+        f"财年财季 {fy} ｜ 当前 {cur_cycle} vs 对比 {cmp_cycle} ｜ "
+        f"范围 {scope}{(' / ' + sub_region) if sub_region else ''}"
     )
 
-    # 模块 1：差异分析（KPI 看板 + 层级树表）
-    with st.container(border=True):
-        st.markdown('<div id="fcst-module-marker" style="display:none;"></div>', unsafe_allow_html=True)
-        st.subheader("差异分析")
-        _render_kpi_dashboard(res["ttl_summary"])
-        _render_tree_table(res["main_table"])
-
-    # 模块 2：by Week 趋势对比
-    with st.container(border=True):
-        st.markdown('<div id="fcst-trend-marker" style="display:none;"></div>', unsafe_allow_html=True)
-        _render_fcst_trend(fy, scope, sub_region)
-
-    # 模块 3：Core MIX 分析（含棋盘格 + by Week Core MIX 子表）
-    with st.container(border=True):
-        st.markdown('<div id="fcst-coremix-marker" style="display:none;"></div>', unsafe_allow_html=True)
-        _render_core_mix(fy, scope, sub_region, cur_cycle)
-        # by Week Core MIX：按 FCST Cycle 展示每个周 Core/Memoline 金额及 Core MIX
-        st.markdown(
-            "<div style='margin-top:0.5rem;padding-top:0.4rem;border-top:1px dashed #ccc;'>"
-            "<b style='font-size:0.85rem;'>by Week Core MIX</b></div>",
-            unsafe_allow_html=True,
+    if fcst_module == "差异分析":
+        # 用 session_state 缓存上次计算结果，左侧导出设置变化时不重新算 FCST
+        # 注意：cache_key 必须包含三个数据桶的 mtime，否则上传/清理数据后
+        # session 缓存仍会返回旧的（=0 的）结果，表现为"选了 Week10 还是 0"。
+        cache_key = (
+            f"{fy}|{cur_cycle}|{cmp_cycle}|{scope}|{sub_region}"
+            f"|{_mapping_mtime()}"
+            f"|{_bucket_mtime('FCST')}|{_bucket_mtime('DG&Quota')}|{_bucket_mtime('历史Union')}"
         )
-        _render_core_mix_by_week(fy, scope, sub_region)
+        res = st.session_state.get("fcst_result")
+        if st.session_state.get("fcst_cache_key") != cache_key or res is None:
+            with st.spinner("正在计算 FCST 分析…"):
+                res = compute_fcst(fy, cur_cycle, cmp_cycle, scope, sub_region)
+            st.session_state["fcst_result"] = res
+            st.session_state["fcst_cache_key"] = cache_key
+        with st.container(border=True):
+            st.markdown('<div id="fcst-module-marker" style="display:none;"></div>', unsafe_allow_html=True)
+            _render_kpi_dashboard(res["ttl_summary"])
+            _render_tree_table(res["main_table"])
+
+    elif fcst_module == "FCST by Week 趋势":
+        with st.container(border=True):
+            st.markdown('<div id="fcst-trend-marker" style="display:none;"></div>', unsafe_allow_html=True)
+            _render_fcst_trend(fy, scope, sub_region)
+
+    elif fcst_module == "Core MIX 分析":
+        with st.container(border=True):
+            st.markdown('<div id="fcst-coremix-marker" style="display:none;"></div>', unsafe_allow_html=True)
+            _render_core_mix(fy, scope, sub_region, cur_cycle)
+            # by Week Core MIX：按 FCST Cycle 展示每个周 Core/Memoline 金额及 Core MIX
+            st.markdown(
+                "<div style='margin-top:0.5rem;padding-top:0.4rem;border-top:1px dashed #ccc;'>"
+                "<b style='font-size:0.85rem;'>by Week Core MIX</b></div>",
+                unsafe_allow_html=True,
+            )
+            _render_core_mix_by_week(fy, scope, sub_region)
 
 
 def _render_fcst_trend(fy, scope, sub_region):
@@ -1167,25 +1169,26 @@ def _render_fcst_trend(fy, scope, sub_region):
         # 注意：不再截断前 15 名，保证满足阈值的大客户完整列出
         return big
 
-    st.subheader("FCST by Week 趋势")
-    c1, c2 = st.columns([4, 1])
+    c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
     with c1:
         st.markdown(
-            "<small>每行展示各 Week 金额及趋势；Solutions / Services 行可点击 ▼ 折叠/展开其下客户。</small>",
+            "<small>每行展示各 Week 金额及趋势；用右侧开关控制 Solutions / Services 大客户明细。</small>",
             unsafe_allow_html=True,
         )
     with c2:
-        show_customers = st.toggle("展开大客户明细", value=False, key="trend_show_cust")
-
-    # 阈值：数据源单位为 USDK，500K 对应数值 500
-    threshold = st.number_input(
-        "大客户阈值",
-        min_value=0,
-        value=500,
-        step=100,
-        key="fcst_cust_threshold",
-        label_visibility="collapsed",
-    )
+        show_solutions_cust = st.toggle("Solutions 客户", value=False, key="trend_show_apos_cust")
+    with c3:
+        show_services_cust = st.toggle("Services 客户", value=False, key="trend_show_pos_cust")
+    with c4:
+        # 阈值：数据源单位为 USDK，1000K 对应数值 1000
+        threshold = st.number_input(
+            "大客户阈值",
+            min_value=0,
+            value=1000,
+            step=100,
+            key="fcst_cust_threshold",
+            label_visibility="collapsed",
+        )
 
     def sparkline(vals, color):
         if len(vals) == 0:
@@ -1229,16 +1232,17 @@ def _render_fcst_trend(fy, scope, sub_region):
         f'<td class="trend">{sparkline(ttl_vals, "#31333F")}</td></tr>'
     )
 
-    def build_group(group_id, label, pos_df, color, is_apos):
+    def build_group(group_id, label, pos_df, color, expanded):
         pos_vals = weekly_series(pos_df)
+        toggle_icon = "▼" if expanded else "▶"
         rows_html.append(
             f'<tr class="row-main row-{group_id}" data-id="{group_id}">'
             f'<td class="label main-label">'
-            f'<span class="tree-toggle" data-target="{group_id}">▼</span>{label}</td>'
+            f'<span class="tree-toggle" data-target="{group_id}">{toggle_icon}</span>{label}</td>'
             f'{make_cells(pos_vals)}'
             f'<td class="trend">{sparkline(pos_vals, color)}</td></tr>'
         )
-        if not show_customers:
+        if not expanded:
             return
         for i, cust in enumerate(get_big_customers(pos_df, threshold)):
             vals = weekly_series(pos_df[pos_df["客户名称"] == cust])
@@ -1251,9 +1255,9 @@ def _render_fcst_trend(fy, scope, sub_region):
             )
 
     # Solutions + customers
-    build_group("apos", "Solutions", df[df["POS_APOS"] == "APOS"], "#0068c9", True)
+    build_group("apos", "Solutions", df[df["POS_APOS"] == "APOS"], "#0068c9", show_solutions_cust)
     # Services + customers
-    build_group("pos", "Services", df[df["POS_APOS"] == "POS"], "#ff4b4b", False)
+    build_group("pos", "Services", df[df["POS_APOS"] == "POS"], "#ff4b4b", show_services_cust)
 
     week_headers = "".join([f'<th class="num week-header">{w}</th>' for w in weeks])
     html = f"""
@@ -1278,8 +1282,7 @@ def _render_fcst_trend(fy, scope, sub_region):
     .trend-hier-table .row-apos .main-label {{ color: #0068c9; }}
     .trend-hier-table .row-pos .main-label {{ color: #ff4b4b; }}
     .trend-hier-table tr:hover {{ background: #f5f5f5; }}
-    .tree-toggle {{ cursor: pointer; width: 12px; display: inline-flex; align-items: center; justify-content: center; color: #666; user-select: none; font-size: 10px; }}
-    .tree-toggle:hover {{ color: #000; }}
+    .tree-toggle {{ cursor: default; width: 12px; display: inline-flex; align-items: center; justify-content: center; color: #666; user-select: none; font-size: 10px; }}
     .tree-spacer {{ width: 12px; display: inline-block; }}
     .spark-svg {{ width: 80px; height: 24px; display: block; margin: 0 auto; }}
     /* 深色模式（显式 class：Streamlit 应用内切黑色主题时也能生效，不依赖 OS prefers-color-scheme） */
@@ -1293,7 +1296,6 @@ def _render_fcst_trend(fy, scope, sub_region):
     .theme-dark .trend-hier-table .row-apos .main-label {{ color: #6ab7ff; }}
     .theme-dark .trend-hier-table .row-pos .main-label {{ color: #ff7a7a; }}
     .theme-dark .tree-toggle {{ color: #c4c4c4; }}
-    .theme-dark .tree-toggle:hover {{ color: #ffffff; }}
     .theme-dark .trend-hier-table tr:hover {{ background: #262732; }}
     @media (prefers-color-scheme: dark) {{
       .trend-hier-table {{ color: #f5f5f5; }}
@@ -1305,9 +1307,8 @@ def _render_fcst_trend(fy, scope, sub_region):
       .trend-hier-table .sub-label {{ color: #dcdcdc; }}
       .trend-hier-table .row-apos .main-label {{ color: #6ab7ff; }}
       .trend-hier-table .row-pos .main-label {{ color: #ff7a7a; }}
-      .tree-toggle {{ color: #c4c4c4; }}
-      .tree-toggle:hover {{ color: #fff; }}
-      .trend-hier-table tr:hover {{ background: #262732; }}
+      .tree-togg    .tree-toggle {{ color: #c4c4c4; }}
+    .trend-hier-table tr:hover {{ background: #262732; }}
     }}
     </style>
     <div class="trend-table-wrap {_theme_cls()}">
@@ -1336,33 +1337,21 @@ def _render_fcst_trend(fy, scope, sub_region):
                         return;
                     }}
                 }}
-            }} catch (e) {{ /* 跨跨源时静默失败 */ }}
+            }} catch (e) {{ /* 跨源时静默失败 */ }}
         }}
-        document.querySelectorAll('.tree-toggle').forEach(function(toggle) {{
-            toggle.addEventListener('click', function(e) {{
-                e.stopPropagation();
-                var target = this.getAttribute('data-target');
-                var expanded = this.textContent === '▼';
-                this.textContent = expanded ? '▶' : '▼';
-                document.querySelectorAll('.child-' + target).forEach(function(row) {{
-                    row.style.display = expanded ? 'none' : 'table-row';
-                }});
-                // 收起/展开后立即重算高度，避免 iframe 内部留白
-                setTimeout(adjustIframeHeight, 0);
-            }});
-        }});
-        // 初始化也调整一次，确保初始高度紧凑
+        // 初始及布局稳定后多次重算高度，确保 iframe 与内容完全贴合、无留白
         adjustIframeHeight();
+        setTimeout(adjustIframeHeight, 50);
+        setTimeout(adjustIframeHeight, 150);
+        setTimeout(adjustIframeHeight, 300);
     }})();
     </script>
     """
 
-    # 折叠大客户明细时只保留 TTL + Solutions + Services 三行，避免大片留白。
-    # 点击小三角时通过 JS 自动重算 iframe 高度，彻底解决展开/收起后残留空白。
-    visible_rows = len(rows_html) if show_customers else 3
+    # 初始高度按实际渲染行数估算；JS 在加载后会再次精确调整，避免展开/收起后残留空白。
     base_height = 80
     row_height = 28
-    components.html(html, height=base_height + visible_rows * row_height, scrolling=False)
+    components.html(html, height=base_height + len(rows_html) * row_height, scrolling=False)
 
 
 def _load_core_mix_base(fy, fcst_mt, dgq_mt, hist_mt):
@@ -1423,7 +1412,6 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
         st.info("所选 Cycle/范围内无有效 Core/Memoline 数据。")
         return
 
-    st.subheader("Core MIX 分析")
     st.markdown(
         "<small>Core MIX = Core 金额 ÷ (Core + Memoline) 金额；选择纵向/横向维度，生成可交互棋盘格。</small>",
         unsafe_allow_html=True,
@@ -2174,15 +2162,15 @@ def main():
     if "run_export" not in st.session_state:
         st.session_state.run_export = False
 
-    # 顶部 fixed 区：主视图切换 + 数据版本/刷新 + FCST 维度/范围选择
-    # 真正钉在视口最顶端（position: fixed），整体高度压到约 1/5（约 40px）
+    # 顶部 fixed 区：主视图切换 + FCST 分析模块 tab + 数据版本/刷新 + FCST 维度/范围选择
+    # 真正钉在视口最顶端（position: fixed），高度随内容自适应但保持紧凑。
     with st.container(border=True):
         st.markdown(
             '<div id="main-top-marker" style="display:none;"></div>',
             unsafe_allow_html=True,
         )
-        # Row 1：视图切换 | 数据版本 | 刷新
-        _r1c1, _r1c2, _r1c3 = st.columns([4, 5, 1])
+        # Row 1：主视图切换 | FCST 分析模块 tab | 刷新
+        _r1c1, _r1c2, _r1c3 = st.columns([3, 6, 1])
         with _r1c1:
             main_view = st.radio(
                 "视图",
@@ -2193,16 +2181,15 @@ def main():
                 index=0,
             )
         with _r1c2:
-            try:
-                _fcst_mt = _bucket_mtime("FCST")
-                if _fcst_mt:
-                    _mt_str = datetime.fromtimestamp(_fcst_mt).strftime("%Y-%m-%d %H:%M:%S")
-                    st.markdown(
-                        f"<span style='font-size:0.55rem;color:#888;'>FCST: {_mt_str}</span>",
-                        unsafe_allow_html=True,
-                    )
-            except Exception:  # noqa
-                pass
+            fcst_module = None
+            if main_view == "FCST 分析":
+                fcst_module = st.radio(
+                    "FCST模块",
+                    ["差异分析", "FCST by Week 趋势", "Core MIX 分析"],
+                    horizontal=True,
+                    key="fcst_module",
+                    label_visibility="collapsed",
+                )
         with _r1c3:
             if st.button(
                 "🔄",
@@ -2213,9 +2200,20 @@ def main():
                 _invalidate_fcst_cache()
                 st.rerun()
 
-        # Row 2：FCST 控件（5 个 selectbox 横向）或导出提示
+        # Row 2：FCST 控件（5 个 selectbox 横向）+ 数据版本；或导出提示
         if main_view == "FCST 分析":
             fcst_vals = _render_fcst_controls_inline()
+            # 数据版本放在第二行末尾，紧凑提示
+            try:
+                _fcst_mt = _bucket_mtime("FCST")
+                if _fcst_mt:
+                    _mt_str = datetime.fromtimestamp(_fcst_mt).strftime("%Y-%m-%d %H:%M:%S")
+                    st.markdown(
+                        f"<span style='font-size:0.5rem;color:#888;'>FCST 数据更新于 {_mt_str}</span>",
+                        unsafe_allow_html=True,
+                    )
+            except Exception:  # noqa
+                pass
         else:
             fcst_vals = None
             st.markdown(
@@ -2229,25 +2227,38 @@ def main():
     st.markdown(
         """
         <style>
-        /* 顶部容器 fixed 钉在视口顶端（stHeader 下方），2 行紧凑布局（JS 兜底会覆盖为动态值） */
+        /* 顶部容器 fixed 钉在视口顶端（stHeader 下方），高度随内容自适应但保持紧凑。
+           背景必须不透明（#ffffff），避免页面内容透出；JS 兜底会同步为动态高度，
+           并依据侧边栏宽度动态设置 left/width，使内容不被侧边栏遮挡。 */
         [data-testid="stLayoutWrapper"]:has(#main-top-marker) {
             position: fixed !important;
             top: 60px !important;
-            left: 0 !important;
+            left: 330px !important;
             right: 0 !important;
+            width: auto !important;
             z-index: 999989 !important;
-            height: 46px !important;
-            overflow: hidden !important;
-            background-color: var(--background-color) !important;
-            padding: 1px 8px !important;
+            height: auto !important;
+            min-height: 46px !important;
+            max-height: none !important;
+            overflow: visible !important;
+            background: #ffffff !important;
+            padding: 2px 8px !important;
             margin: 0 !important;
             line-height: 1 !important;
             box-sizing: border-box !important;
             box-shadow: 0 1px 4px rgba(0,0,0,0.10) !important;
         }
-        /* 防止内容被 fixed 顶部条遮挡，给主区域加 padding-top（60 header + 46 bar + 10 间距） */
+        .theme-dark [data-testid="stLayoutWrapper"]:has(#main-top-marker) {
+            background: #0e1117 !important;
+        }
+        @media (prefers-color-scheme: dark) {
+            [data-testid="stLayoutWrapper"]:has(#main-top-marker) {
+                background: #0e1117 !important;
+            }
+        }
+        /* 防止内容被 fixed 顶部条遮挡，给主区域加 padding-top（JS 兜底会覆盖为实际高度+间距） */
         [data-testid="stMainBlockContainer"] {
-            padding-top: 116px !important;
+            padding-top: 150px !important;
         }
         /* 极小字号与行高 */
         [data-testid="stLayoutWrapper"]:has(#main-top-marker) h3 {
@@ -2321,6 +2332,32 @@ def main():
         [data-testid="stLayoutWrapper"]:has(#main-top-marker) [data-baseweb="select"] {
             border-radius: 3px !important;
         }
+        /* Streamlit 1.6x 用 React-Aria ComboBox，额外压缩其高度 */
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stSelectbox div.react-aria-ComboBox {
+            min-height: 18px !important;
+            height: 18px !important;
+        }
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stSelectbox .react-aria-ComboBox > div {
+            min-height: 18px !important;
+            height: 18px !important;
+            padding: 0 4px !important;
+        }
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stSelectbox .react-aria-ComboBox input {
+            min-height: 16px !important;
+            height: 16px !important;
+            font-size: 0.55rem !important;
+            padding: 0 4px !important;
+        }
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stSelectbox .react-aria-ComboBox button {
+            min-height: 16px !important;
+            height: 16px !important;
+            width: 16px !important;
+            padding: 0 !important;
+        }
+        [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stSelectbox .react-aria-ComboBox button svg {
+            width: 11px !important;
+            height: 11px !important;
+        }
         /* 隐藏 warning 信息的留白 */
         [data-testid="stLayoutWrapper"]:has(#main-top-marker) .stAlert {
             padding: 0.1rem 0.3rem !important;
@@ -2353,14 +2390,13 @@ def main():
     _pin_js = """
     <script>
     (function() {
-        var BAR_H = 46;
-        var STYLE_ID = 'pin-bar-style-v2';
+        var STYLE_ID = 'pin-bar-style-v3';
         function ensureStyle(doc) {
             if (doc.getElementById(STYLE_ID)) return;
             var st = doc.createElement('style');
             st.id = STYLE_ID;
             st.textContent = [
-                '.fcst-pin-bar { position: fixed !important; z-index: 999989 !important; left: 0 !important; right: 0 !important; width: 100% !important; height: ' + BAR_H + 'px !important; overflow: hidden !important; background: var(--background-color, #ffffff) !important; padding: 1px 8px !important; box-sizing: border-box !important; box-shadow: 0 1px 4px rgba(0,0,0,0.10) !important; line-height: 1 !important; }',
+                '.fcst-pin-bar { position: fixed !important; z-index: 999989 !important; height: auto !important; min-height: 46px !important; overflow: visible !important; background: #ffffff !important; padding: 2px 8px !important; box-sizing: border-box !important; box-shadow: 0 1px 4px rgba(0,0,0,0.10) !important; line-height: 1 !important; }',
                 '.fcst-pin-bar [data-testid="stVerticalBlock"] { gap: 0 !important; }',
                 '.fcst-pin-bar [data-testid="stVerticalBlock"] > div { margin: 0 !important; padding: 0 !important; }',
                 '.fcst-pin-bar [data-testid="stHorizontalBlock"] { gap: 4px !important; margin: 0 !important; padding: 0 !important; align-items: center !important; min-height: 0 !important; }',
@@ -2389,6 +2425,10 @@ def main():
             var hd = doc.querySelector('[data-testid="stHeader"]');
             return hd ? hd.getBoundingClientRect().height : 60;
         }
+        function sidebarW(doc) {
+            var sb = doc.querySelector('[data-testid="stSidebar"]');
+            return sb ? (sb.getBoundingClientRect().width || 0) : 0;
+        }
         function apply() {
             try {
                 var doc = window.parent.document;
@@ -2400,11 +2440,15 @@ def main():
                 if (!el) return;
                 if (!el.classList.contains('fcst-pin-bar')) el.classList.add('fcst-pin-bar');
                 var hh = headerH(doc);
-                el.style.top = hh + 'px';
-                // 主内容下移，避免被固定条遮挡
+                var sw = sidebarW(doc);
+                el.style.setProperty('top', hh + 'px', 'important');
+                el.style.setProperty('left', sw + 'px', 'important');
+                el.style.setProperty('width', 'calc(100% - ' + sw + 'px)', 'important');
+                // 按实际高度动态计算主内容偏移，确保内容不被遮挡
+                var barH = el.offsetHeight || 46;
                 var main = doc.querySelector('[data-testid="stMainBlockContainer"]')
                         || doc.querySelector('.main .block-container');
-                if (main) main.style.paddingTop = (hh + BAR_H + 10) + 'px';
+                if (main) main.style.paddingTop = (hh + barH + 10) + 'px';
             } catch (e) { /* 跨域时静默失败 */ }
         }
         apply();
