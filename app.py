@@ -1324,8 +1324,11 @@ def _render_fcst_trend(fy, scope, sub_region):
     .trend-hier-table td.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 10px; }}
     .trend-hier-table td.label {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
     .trend-hier-table td.trend {{ text-align: center; }}
-    .trend-hier-table .main-label {{ font-weight: 600; font-size: 12px; display: flex; align-items: center; gap: 5px; }}
-    .trend-hier-table .sub-label {{ padding-left: 20px; font-size: 11px; color: #555; display: flex; align-items: center; gap: 5px; }}
+    /* 注意：td 不能用 display:flex，否则单元格高度脱离表格行高导致横线窜位 */
+    .trend-hier-table .main-label {{ font-weight: 600; font-size: 12px; }}
+    .trend-hier-table .sub-label {{ padding-left: 20px; font-size: 11px; color: #555; }}
+    .trend-hier-table .tree-toggle {{ margin-right: 5px; }}
+    .trend-hier-table .tree-spacer {{ display: inline-block; }}
     .trend-hier-table .row-main {{ background: #fff; }}
     .trend-hier-table .row-cust {{ background: #fafafa; }}
     .trend-hier-table .row-ttl .main-label {{ color: #31333F; }}
@@ -1347,6 +1350,9 @@ def _render_fcst_trend(fy, scope, sub_region):
     .theme-dark .trend-hier-table .row-pos .main-label {{ color: #ff7a7a; }}
     .theme-dark .tree-toggle {{ color: #c4c4c4; }}
     .theme-dark .trend-hier-table tr:hover {{ background: #262732; }}
+    /* dark 主题下 TTL 行 sparkline 由深灰改为浅色，避免看不清 */
+    .theme-dark .trend-hier-table .row-ttl .spark-svg polyline {{ stroke: #f5f5f5; }}
+    .theme-dark .trend-hier-table .row-ttl .spark-svg circle {{ fill: #f5f5f5; }}
     </style>
     <div class="trend-table-wrap {_theme_cls()}">
     <table class="trend-hier-table">
@@ -1691,8 +1697,9 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
 
     st.markdown(
         f"<small style='color:#666;'>按 FCST Cycle 展示每个 Week 在【<b>{_esc_html(vertical_dim)}</b>】维度下的 Core MIX%；"
-        "配色以【当前 Cycle 列的值】为基准：大于基准=绿色渐变（越深），小于基准=橙色渐变（越深）；"
-        "首行汇总=整体每周 Core MIX；最后一列=各维度值的 by week Trend。</small>",
+        "配色以【汇总行当前 Cycle 值】为基准（该单元格绿字加粗、背景随主题反色）："
+        "≥基准=绿色渐变（值越大越深，白字加粗），&lt;基准=橙色渐变（值越小越深，黑字）；"
+        "最后一列=各维度值的 by week Trend。</small>",
         unsafe_allow_html=True,
     )
 
@@ -1750,56 +1757,49 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
     def _fmt_pct(x):
         return "—" if x is None or pd.isna(x) else f"{int(round(x))}%"
 
-    # —— 两阶段：先计算全部行数据与配色基准，再统一渲染 ——
-    # 基准 = 该行在【当前 FCST Cycle】列的值；行内无当前 Cycle 值时回退到汇总行的当前 Cycle 值
+    # —— 配色基准 = 汇总行【当前 FCST Cycle】列的值（如 Week11 汇总 55%）——
+    # 该基准单元格本身：文字绿色加粗，背景 dark=白色 / light=黑色（CSS 随主题切换）；
+    # 其余所有单元格（含汇总行其他周、各维度行全部周）：
+    #   >= 基准 → 绿色渐变（值越大越深），文字白色加粗；
+    #   <  基准 → 橙色渐变（值越小越深），文字黑色不加粗。
     summary_vals = [week_mix_idx.get(w) for w in weeks]
     summary_ref = week_mix_idx.get(cur_cycle) if cur_cycle else None
+    try:
+        ref_col_idx = weeks.index(cur_cycle) if cur_cycle else None
+    except ValueError:
+        ref_col_idx = None
 
-    row_data = []  # (label, vals, ref)
+    row_data = []  # (label, vals)
     for _, r in v_grp.iterrows():
         v_val = r[vertical_dim]
-        vals = [cross_idx.get((v_val, w)) for w in weeks]
-        ref = cross_idx.get((v_val, cur_cycle)) if cur_cycle else None
-        if ref is None or pd.isna(ref):
-            ref = summary_ref
-        row_data.append((v_val, vals, ref))
+        row_data.append((v_val, [cross_idx.get((v_val, w)) for w in weeks]))
 
-    # 全局渐变刻度：所有单元格相对各自基准的最大偏离幅度
-    excess, deficit = [], []
-    for vals, ref0 in [(summary_vals, summary_ref)] + [(rd[1], rd[2]) for rd in row_data]:
-        if ref0 is None or pd.isna(ref0):
-            continue
-        for v in vals:
-            if v is None or pd.isna(v):
-                continue
-            if v > ref0:
-                excess.append(v - ref0)
-            elif v < ref0:
-                deficit.append(ref0 - v)
-    max_excess = max(excess) if excess else 0.0
-    max_deficit = max(deficit) if deficit else 0.0
+    all_vals = [
+        v
+        for vals in [summary_vals] + [rd[1] for rd in row_data]
+        for v in vals
+        if v is not None and not pd.isna(v)
+    ]
+    if summary_ref is not None and not pd.isna(summary_ref) and all_vals:
+        max_excess = max([v - summary_ref for v in all_vals if v >= summary_ref] or [0.0])
+        max_deficit = max([summary_ref - v for v in all_vals if v < summary_ref] or [0.0])
+    else:
+        max_excess = max_deficit = 0.0
 
     def _blend(c1, c2, t):
         return "#%02x%02x%02x" % tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
 
-    def _mix_bg_fg(pct, ref):
-        """配色：> 基准绿渐变（越高于基准越深），< 基准橙渐变（越低于基准越深）；
-        等于基准或无基准不着色。"""
+    def _mix_bg_fg(pct):
+        """ >= 基准绿渐变（值越大越深，白字加粗）；< 基准橙渐变（值越小越深，黑字不加粗）。"""
         if pct is None or pd.isna(pct):
             return ("transparent", "#999999", False)
-        if ref is None or pd.isna(ref):
+        if summary_ref is None or pd.isna(summary_ref):
             return ("transparent", "inherit", False)
-        if pct > ref:
-            t = (pct - ref) / max_excess if max_excess > 0 else 1.0
-            bg = _blend((200, 230, 201), (27, 94, 32), t)   # 浅绿 → 深绿
-            fg = "#ffffff" if t > 0.45 else "#1a1a1a"
-            return (bg, fg, True)
-        if pct < ref:
-            t = (ref - pct) / max_deficit if max_deficit > 0 else 1.0
-            bg = _blend((255, 224, 178), (230, 81, 0), t)   # 浅橙 → 深橙
-            fg = "#ffffff" if t > 0.55 else "#1a1a1a"
-            return (bg, fg, False)
-        return ("transparent", "inherit", False)
+        if pct >= summary_ref:
+            t = (pct - summary_ref) / max_excess if max_excess > 0 else 0.0
+            return (_blend((27, 94, 32), (200, 230, 201), t), "#ffffff", True)
+        t = (summary_ref - pct) / max_deficit if max_deficit > 0 else 0.0
+        return (_blend((230, 81, 0), (255, 224, 178), t), "#1a1a1a", False)
 
     def _spark_line(vals, color):
         """按周走势折线 sparkline（与 by Week 趋势表同款风格）。"""
@@ -1818,9 +1818,11 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
             px = (i / (len(vals) - 1)) * (W - 4) + 2 if len(vals) > 1 else W / 2
             py = H / 2 if rng == 0 else H - 4 - ((v - min_v) / rng) * (H - 8)
             coords.append((px, py))
-        seg_pts = " ".join([f"{x:.1f},{y:.1f}" for x, y in coords if x is not None])
+        # 先过滤掉缺周（None）坐标再解包，否则稀疏维度（如 产品大类/SPL）会 TypeError
+        valid_coords = [c for c in coords if c is not None]
+        seg_pts = " ".join([f"{x:.1f},{y:.1f}" for x, y in valid_coords])
         circles = "".join(
-            [f'<circle cx="{x:.1f}" cy="{y:.1f}" r="1.8" fill="{color}"/>' for x, y in coords if x is not None]
+            [f'<circle cx="{x:.1f}" cy="{y:.1f}" r="1.8" fill="{color}"/>' for x, y in valid_coords]
         )
         return (
             f'<svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" class="cmbw-spark">'
@@ -1835,14 +1837,18 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
 
     rows_html = []
 
-    def _render_row(label, vals, ref, is_summary=False):
+    def _render_row(label, vals, is_summary=False):
         cells = [
             '<td class="lbl">'
             + ("<b>" + _esc_html(str(label)) + "</b>" if is_summary else _esc_html(str(label)))
             + "</td>"
         ]
-        for v in vals:
-            bg, fg, bold = _mix_bg_fg(v, ref)
+        for i, v in enumerate(vals):
+            if is_summary and ref_col_idx is not None and i == ref_col_idx and summary_ref is not None and not pd.isna(summary_ref):
+                # 基准单元格：绿字加粗，背景随主题（dark=白/light=黑，由 CSS 控制）
+                cells.append(f'<td class="num ref-cell">{_fmt_pct(v)}</td>')
+                continue
+            bg, fg, bold = _mix_bg_fg(v)
             fw = "bold" if bold else "normal"
             cells.append(
                 f'<td class="num" style="background:{bg};color:{fg};font-weight:{fw};">{_fmt_pct(v)}</td>'
@@ -1854,11 +1860,11 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
             + f'<td class="num trendcol">{_spark_line(vals, spark_color)}</td></tr>'
         )
 
-    # 汇总行（置顶，基准=当前 Cycle 的整体 Core MIX）
-    _render_row("汇总", summary_vals, summary_ref, is_summary=True)
-    # 各维度值行（基准=各自当前 Cycle 值）
-    for label, vals, ref in row_data:
-        _render_row(label, vals, ref)
+    # 汇总行（置顶；当前 Cycle 单元格为配色基准）
+    _render_row("汇总", summary_vals, is_summary=True)
+    # 各维度值行
+    for label, vals in row_data:
+        _render_row(label, vals)
 
     n_week_cols = len(weeks)
     colgroup = (
@@ -1888,6 +1894,13 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
     .theme-dark .cmbw-table td {{ border-bottom-color: #36363f; border-right-color: #36363f; }}
     .theme-dark .cmbw-table td.lbl {{ background: #1b1d26; color: #f5f5f5; }}
     .theme-dark .cmbw-table tbody tr.summary-row td {{ background: #1f212b; }}
+    /* 基准单元格（汇总行当前 Cycle）：绿字加粗；背景 dark=白 / light=黑，随主题切换 */
+    .cmbw-table td.ref-cell {{ color: #00b050; font-weight: 700; }}
+    .theme-light .cmbw-table td.ref-cell {{ background: #000000; }}
+    .theme-dark .cmbw-table td.ref-cell {{ background: #ffffff; }}
+    /* dark 主题下汇总行 sparkline 由深灰改为浅色，避免看不清 */
+    .theme-dark .cmbw-table tr.summary-row .cmbw-spark polyline {{ stroke: #f5f5f5; }}
+    .theme-dark .cmbw-table tr.summary-row .cmbw-spark circle {{ fill: #f5f5f5; }}
     </style>
     <div class="cmbw-wrap {_theme_cls()}">
     <table class="cmbw-table">
