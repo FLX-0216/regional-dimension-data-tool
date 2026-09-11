@@ -79,6 +79,31 @@ def _theme_cls():
     return "theme-dark" if _is_dark_theme() else "theme-light"
 
 
+_THEME_RUNTIME_JS = """
+<script>
+(function() {
+    function detect() {
+        try {
+            var doc = window.parent.document;
+            var app = doc.querySelector('.stApp') || doc.body;
+            if (!app) return;
+            var bg = getComputedStyle(app).backgroundColor || '';
+            var m = bg.match(/[\\d.]+/g);
+            if (!m || m.length < 3) return;
+            var lum = 0.299 * parseFloat(m[0]) + 0.587 * parseFloat(m[1]) + 0.114 * parseFloat(m[2]);
+            var el = document.documentElement;
+            if (lum < 128) { el.classList.add('theme-dark'); el.classList.remove('theme-light'); }
+            else { el.classList.add('theme-light'); el.classList.remove('theme-dark'); }
+        } catch (e) { /* 跨域时静默失败 */ }
+    }
+    detect();
+    setTimeout(detect, 60);
+    setTimeout(detect, 200);
+})();
+</script>
+"""
+
+
 def _esc_html(s):
     """HTML 转义，避免维度值中的特殊字符破坏表格。"""
     return (
@@ -900,18 +925,6 @@ def _build_tree_html(df):
     .theme-dark .tree-toggle { color: #c4c4c4; }
     .theme-dark .tree-toggle:hover { color: #ffffff; }
     .theme-dark .tree-row:hover { background: #262732; }
-    @media (prefers-color-scheme: dark) {
-      .tree-table { color: #f5f5f5; }
-      .tree-table th { background: #262730; color: #f5f5f5; border-bottom-color: #48484f; }
-      .tree-table td { border-bottom-color: #36363f; }
-      .tree-row.level-0 { background: #171922; }
-      .tree-row.level-1 { color: #ffffff; }
-      .tree-row.level-2 { color: #ededed; }
-      .tree-row.level-3 { color: #d6d6d6; }
-      .tree-toggle { color: #c4c4c4; }
-      .tree-toggle:hover { color: #fff; }
-      .tree-row:hover { background: #262732; }
-    }
     </style>
     """
 
@@ -939,19 +952,48 @@ def _build_tree_html(df):
                 var expanded = this.textContent === '▼';
                 this.textContent = expanded ? '▶' : '▼';
                 setChildrenDisplay(rowId, !expanded);
+                // 展开/收起后重算 iframe 高度，避免残留空白或内容被裁切
+                setTimeout(adjustIframeHeight, 0);
+                setTimeout(adjustIframeHeight, 60);
             });
         });
+
+        function adjustIframeHeight() {
+            var wrap = document.querySelector('.tree-table-wrap') || document.querySelector('.tree-table');
+            if (!wrap) return;
+            var newHeight = wrap.offsetHeight + 8;
+            var frame = window.frameElement;
+            if (frame) { frame.style.height = newHeight + 'px'; return; }
+            try {
+                var iframes = window.parent.document.querySelectorAll('iframe');
+                for (var i = 0; i < iframes.length; i++) {
+                    if (iframes[i].contentWindow === window) {
+                        iframes[i].style.height = newHeight + 'px';
+                        return;
+                    }
+                }
+            } catch (err) { /* 跨源时静默失败 */ }
+        }
+        adjustIframeHeight();
+        setTimeout(adjustIframeHeight, 50);
+        setTimeout(adjustIframeHeight, 150);
     })();
     </script>
     """
-    return css + table_html + js
+    return css + table_html + js + _THEME_RUNTIME_JS
 
 
 def _render_tree_table(df):
-    """用 Streamlit HTML 组件渲染可折叠树表。"""
+    """用 Streamlit HTML 组件渲染可折叠树表（高度随可见行数自适应，展开/收起由 JS 动态调整）。"""
     import streamlit.components.v1 as components
     html = _build_tree_html(df)
-    components.html(html, height=650, scrolling=True)
+    # 初始可见行：level<2（TTL/APOS/POS、产线大类）；JS 加载后按实际内容精确调整
+    try:
+        visible_rows = int((pd.to_numeric(df["level"], errors="coerce") < 2).sum())
+    except Exception:  # noqa
+        visible_rows = len(df)
+    visible_rows = max(1, visible_rows)
+    components.html(html, height=46 + visible_rows * 36 + 10, scrolling=False)
 
 
 def _render_kpi_dashboard(ttl):
@@ -1021,8 +1063,14 @@ def _render_kpi_dashboard(ttl):
     .kpi-title {{ font-size: 12px; color: #888888; margin-bottom: 6px; letter-spacing: 0.3px; }}
     .kpi-value {{ font-size: 24px; font-weight: 600; color: #31333F; font-variant-numeric: tabular-nums; }}
     .kpi-sub {{ font-size: 11px; color: #aaaaaa; margin-top: 4px; }}
+    /* 深色模式（由运行时 JS 检测父页面背景后自动切换） */
+    .theme-dark .kpi-card {{ background: #1f212b; border-color: #36363f; box-shadow: none; }}
+    .theme-dark .kpi-title {{ color: #9aa0a6; }}
+    .theme-dark .kpi-value {{ color: #f5f5f5; }}
+    .theme-dark .kpi-sub {{ color: #80868b; }}
     </style>
     <div class="kpi-board">{cols_html}</div>
+    {_THEME_RUNTIME_JS}
     """
     components.html(html, height=120)
 
@@ -1297,19 +1345,6 @@ def _render_fcst_trend(fy, scope, sub_region):
     .theme-dark .trend-hier-table .row-pos .main-label {{ color: #ff7a7a; }}
     .theme-dark .tree-toggle {{ color: #c4c4c4; }}
     .theme-dark .trend-hier-table tr:hover {{ background: #262732; }}
-    @media (prefers-color-scheme: dark) {{
-      .trend-hier-table {{ color: #f5f5f5; }}
-      .trend-hier-table th {{ background: #262730; border-bottom-color: #48484f; color: #f5f5f5; }}
-      .trend-hier-table td {{ border-bottom-color: #36363f; }}
-      .trend-hier-table .row-main {{ background: #171922; }}
-      .trend-hier-table .row-cust {{ background: #1f212b; }}
-      .trend-hier-table .row-ttl .main-label {{ color: #ffffff; }}
-      .trend-hier-table .sub-label {{ color: #dcdcdc; }}
-      .trend-hier-table .row-apos .main-label {{ color: #6ab7ff; }}
-      .trend-hier-table .row-pos .main-label {{ color: #ff7a7a; }}
-      .tree-togg    .tree-toggle {{ color: #c4c4c4; }}
-    .trend-hier-table tr:hover {{ background: #262732; }}
-    }}
     </style>
     <div class="trend-table-wrap {_theme_cls()}">
     <table class="trend-hier-table">
@@ -1346,6 +1381,7 @@ def _render_fcst_trend(fy, scope, sub_region):
         setTimeout(adjustIframeHeight, 300);
     }})();
     </script>
+    {_THEME_RUNTIME_JS}
     """
 
     # 初始高度按实际渲染行数估算；JS 在加载后会再次精确调整，避免展开/收起后残留空白。
@@ -1604,13 +1640,6 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
     .theme-dark .core-mix-table tbody tr.summary-row td { background: #0e1117; }
     .theme-dark .core-mix-table tbody tr.summary-row td.dim-label { background: #1b1d26; }
     .theme-dark .core-mix-table .h-mix { color: #d0d0d0; }
-    @media (prefers-color-scheme: dark) {
-      .core-mix-table { color: #f5f5f5; background: #0e1117; }
-      .core-mix-table th { background: #262730; color: #f5f5f5; border-bottom-color: #48484f; border-right-color: #48484f; }
-      .core-mix-table td { border-bottom-color: #36363f; border-right-color: #36363f; }
-      .core-mix-table td.dim-label { background: #1b1d26; color: #f5f5f5; font-weight: 600; }
-      .core-mix-table .h-mix { color: #d0d0d0; }
-    }
     </style>
     """
 
@@ -1622,6 +1651,7 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
         + '<tr class="summary-row">' + "".join(summary_cells) + "</tr>"
         + "".join(row_html_list)
         + "</tbody></table></div>"
+        + _THEME_RUNTIME_JS
     )
 
     components.html(html, height=90 + (len(v_grp) + 2) * 26, scrolling=True)
@@ -1828,6 +1858,7 @@ def _render_core_mix_by_week(fy, scope, sub_region):
     <tbody>{"".join(rows_html)}</tbody>
     </table>
     </div>
+    {_THEME_RUNTIME_JS}
     """
     components.html(html, height=76 + (len(v_grp) + 1) * 26 + 2, scrolling=False)
 
@@ -2228,8 +2259,7 @@ def main():
         """
         <style>
         /* 顶部容器 fixed 钉在视口顶端（stHeader 下方），高度随内容自适应但保持紧凑。
-           背景必须不透明（#ffffff），避免页面内容透出；JS 兜底会同步为动态高度，
-           并依据侧边栏宽度动态设置 left/width，使内容不被侧边栏遮挡。 */
+           背景跟随主题（JS 兜底会同步为父页面实际背景色），高度与 left/width 由 JS 动态设置。 */
         [data-testid="stLayoutWrapper"]:has(#main-top-marker) {
             position: fixed !important;
             top: 60px !important;
@@ -2241,20 +2271,12 @@ def main():
             min-height: 46px !important;
             max-height: none !important;
             overflow: visible !important;
-            background: #ffffff !important;
+            background: var(--background-color, #ffffff) !important;
             padding: 2px 8px !important;
             margin: 0 !important;
             line-height: 1 !important;
             box-sizing: border-box !important;
             box-shadow: 0 1px 4px rgba(0,0,0,0.10) !important;
-        }
-        .theme-dark [data-testid="stLayoutWrapper"]:has(#main-top-marker) {
-            background: #0e1117 !important;
-        }
-        @media (prefers-color-scheme: dark) {
-            [data-testid="stLayoutWrapper"]:has(#main-top-marker) {
-                background: #0e1117 !important;
-            }
         }
         /* 防止内容被 fixed 顶部条遮挡，给主区域加 padding-top（JS 兜底会覆盖为实际高度+间距） */
         [data-testid="stMainBlockContainer"] {
@@ -2396,7 +2418,7 @@ def main():
             var st = doc.createElement('style');
             st.id = STYLE_ID;
             st.textContent = [
-                '.fcst-pin-bar { position: fixed !important; z-index: 999989 !important; height: auto !important; min-height: 46px !important; overflow: visible !important; background: #ffffff !important; padding: 2px 8px !important; box-sizing: border-box !important; box-shadow: 0 1px 4px rgba(0,0,0,0.10) !important; line-height: 1 !important; }',
+                '.fcst-pin-bar { position: fixed !important; z-index: 999989 !important; height: auto !important; min-height: 46px !important; overflow: visible !important; background: var(--background-color, #ffffff) !important; padding: 2px 8px !important; box-sizing: border-box !important; box-shadow: 0 1px 4px rgba(0,0,0,0.10) !important; line-height: 1 !important; }',
                 '.fcst-pin-bar [data-testid="stVerticalBlock"] { gap: 0 !important; }',
                 '.fcst-pin-bar [data-testid="stVerticalBlock"] > div { margin: 0 !important; padding: 0 !important; }',
                 '.fcst-pin-bar [data-testid="stHorizontalBlock"] { gap: 4px !important; margin: 0 !important; padding: 0 !important; align-items: center !important; min-height: 0 !important; }',
@@ -2429,6 +2451,10 @@ def main():
             var sb = doc.querySelector('[data-testid="stSidebar"]');
             return sb ? (sb.getBoundingClientRect().width || 0) : 0;
         }
+        function themeBg(doc) {
+            var app = doc.querySelector('.stApp') || doc.body;
+            return app ? getComputedStyle(app).backgroundColor : '';
+        }
         function apply() {
             try {
                 var doc = window.parent.document;
@@ -2444,6 +2470,9 @@ def main():
                 el.style.setProperty('top', hh + 'px', 'important');
                 el.style.setProperty('left', sw + 'px', 'important');
                 el.style.setProperty('width', 'calc(100% - ' + sw + 'px)', 'important');
+                // 背景跟随主题（dark 模式下避免白底白字）
+                var bg = themeBg(doc);
+                if (bg) el.style.setProperty('background-color', bg, 'important');
                 // 按实际高度动态计算主内容偏移，确保内容不被遮挡
                 var barH = el.offsetHeight || 46;
                 var main = doc.querySelector('[data-testid="stMainBlockContainer"]')
