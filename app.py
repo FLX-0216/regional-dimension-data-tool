@@ -94,6 +94,12 @@ _THEME_RUNTIME_JS = """
             var el = document.documentElement;
             if (lum < 128) { el.classList.add('theme-dark'); el.classList.remove('theme-light'); }
             else { el.classList.add('theme-light'); el.classList.remove('theme-dark'); }
+            // 同步所有静态主题包装 div（Python 渲染的 theme-light/theme-dark 类不会随运行时切换自动更新）
+            var dark = el.classList.contains('theme-dark');
+            document.querySelectorAll('.theme-light, .theme-dark').forEach(function(d) {
+                d.classList.toggle('theme-dark', dark);
+                d.classList.toggle('theme-light', !dark);
+            });
         } catch (e) { /* 跨域时静默失败 */ }
     }
     detect();
@@ -1616,7 +1622,7 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
 
     css = """
     <style>
-    .core-mix-wrap { overflow-x: auto; }
+    .core-mix-wrap { overflow: auto; max-height: 480px; }
     .core-mix-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-family: "Source Sans Pro", sans-serif; font-size: 11px; color: #31333F; }
     .core-mix-table * { box-sizing: border-box; }
     .core-mix-table th, .core-mix-table td { padding: 3px 5px; border-bottom: 1px solid #e0e0e0; border-right: 1px solid #e0e0e0; vertical-align: middle; text-align: center; }
@@ -1662,7 +1668,12 @@ def _render_core_mix(fy, scope, sub_region, cur_cycle):
         + _THEME_RUNTIME_JS
     )
 
-    components.html(html, height=90 + (len(v_grp) + 2) * 26, scrolling=True)
+    # 限高 + 内部滚动（表头与汇总行已 sticky 固定），避免 SPL/产线等长列表把页面撑得过长
+    components.html(
+        html,
+        height=min(90 + (len(v_grp) + 2) * 26, 560),
+        scrolling=False,
+    )
 
 
 def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
@@ -1797,9 +1808,9 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
             return ("transparent", "inherit", False)
         if pct >= summary_ref:
             t = (pct - summary_ref) / max_excess if max_excess > 0 else 0.0
-            return (_blend((27, 94, 32), (200, 230, 201), t), "#ffffff", True)
+            return (_blend((200, 230, 201), (27, 94, 32), t), "#ffffff", True)   # 值越大越深
         t = (summary_ref - pct) / max_deficit if max_deficit > 0 else 0.0
-        return (_blend((230, 81, 0), (255, 224, 178), t), "#1a1a1a", False)
+        return (_blend((255, 224, 178), (230, 81, 0), t), "#1a1a1a", False)      # 值越小越深
 
     def _spark_line(vals, color):
         """按周走势折线 sparkline（与 by Week 趋势表同款风格）。"""
@@ -1850,6 +1861,10 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
                 continue
             bg, fg, bold = _mix_bg_fg(v)
             fw = "bold" if bold else "normal"
+            if is_summary and bg == "transparent":
+                # 汇总行无数据单元格不写内联背景，交给 CSS（吸顶时不透底，且深浅主题都正确）
+                cells.append(f'<td class="num" style="color:{fg};">{_fmt_pct(v)}</td>')
+                continue
             cells.append(
                 f'<td class="num" style="background:{bg};color:{fg};font-weight:{fw};">{_fmt_pct(v)}</td>'
             )
@@ -1880,9 +1895,10 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
     .cmbw-table * {{ box-sizing: border-box; }}
     .cmbw-table th, .cmbw-table td {{ padding: 3px 5px; border-bottom: 1px solid #e0e0e0; border-right: 1px solid #e0e0e0; vertical-align: middle; }}
     .cmbw-table th:last-child, .cmbw-table td:last-child {{ border-right: none; }}
-    .cmbw-table thead th {{ position: sticky; top: 0; background: #f7f7f8; font-weight: 600; text-align: center; white-space: nowrap; z-index: 5; }}
+    .cmbw-table thead th {{ position: sticky; top: 0; height: 26px; background: #f7f7f8; font-weight: 600; text-align: center; white-space: nowrap; z-index: 5; }}
     .cmbw-table thead th.lbl {{ text-align: left; }}
-    .cmbw-table tbody tr.summary-row td {{ background: #fbfbfc; font-weight: 600; }}
+    /* 汇总行吸顶（紧贴表头下方），滚动时不被滚没 */
+    .cmbw-table tbody tr.summary-row td {{ background: #fbfbfc; font-weight: 600; position: sticky; top: 26px; z-index: 4; }}
     .cmbw-table tbody tr.summary-row td.num {{ font-weight: 600; }}
     .cmbw-table td.num {{ text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 10px; }}
     .cmbw-table td.lbl {{ text-align: left; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
@@ -1894,8 +1910,8 @@ def _render_core_mix_by_week(fy, scope, sub_region, cur_cycle=None):
     .theme-dark .cmbw-table td {{ border-bottom-color: #36363f; border-right-color: #36363f; }}
     .theme-dark .cmbw-table td.lbl {{ background: #1b1d26; color: #f5f5f5; }}
     .theme-dark .cmbw-table tbody tr.summary-row td {{ background: #1f212b; }}
-    /* 基准单元格（汇总行当前 Cycle）：绿字加粗；背景 dark=白 / light=黑，随主题切换 */
-    .cmbw-table td.ref-cell {{ color: #00b050; font-weight: 700; }}
+    /* 基准单元格（汇总行当前 Cycle）：绿字加粗加大字号；背景 dark=白 / light=黑，随主题切换 */
+    .cmbw-table td.ref-cell {{ color: #00b050; font-weight: 700; font-size: 13px; }}
     .theme-light .cmbw-table td.ref-cell {{ background: #000000; }}
     .theme-dark .cmbw-table td.ref-cell {{ background: #ffffff; }}
     /* dark 主题下汇总行 sparkline 由深灰改为浅色，避免看不清 */
